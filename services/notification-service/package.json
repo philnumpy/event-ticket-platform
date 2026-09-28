@@ -13,7 +13,8 @@
   "dependencies": {
     "@etp/domain": "0.1.0",
     "@etp/messaging": "0.1.0",
-    "kafkajs": "^2.2.4"
+    "kafkajs": "^2.2.4",
+    "pino": "^9.5.0"
   },
   "devDependencies": {
     "@types/jest": "^29.5.12",

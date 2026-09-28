@@ -48,6 +48,7 @@ export class KafkaEventPublisher implements EventPublisherPort {
           headers: {
             eventId: record.id,
             occurredAt: record.occurredAt.toISOString(),
+            ...(record.correlationId ? { correlationId: record.correlationId } : {}),
           },
         },
       ],

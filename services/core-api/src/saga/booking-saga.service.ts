@@ -8,6 +8,8 @@ import { PaymentCommandPublisher } from './PaymentCommandPublisher';
 import { ResponseConsumer } from './ResponseConsumer';
 import { CircuitBreaker } from '../common/CircuitBreaker';
 import { withRetryBackoff } from '../common/retryWithBackoff';
+import { correlationStorage, getCorrelationId } from '../common/observability/correlation-context';
+import { circuitBreakerTransitionsTotal } from '../common/metrics/metrics.registry';
 
 /**
  * The saga orchestrator ADR 0001 named but hadn't been built yet: reacts to
@@ -31,11 +33,12 @@ import { withRetryBackoff } from '../common/retryWithBackoff';
 @Injectable()
 export class BookingSagaService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(BookingSagaService.name);
-  private readonly paymentCommandBreaker = new CircuitBreaker('payment-command-publisher', {
-    failureThreshold: 5,
-    cooldownMs: 30_000,
-    timeoutMs: 5_000,
-  });
+  private readonly paymentCommandBreaker = new CircuitBreaker(
+    'payment-command-publisher',
+    { failureThreshold: 5, cooldownMs: 30_000, timeoutMs: 5_000 },
+    undefined,
+    (state) => circuitBreakerTransitionsTotal.inc({ breaker: 'payment-command-publisher', state }),
+  );
 
   constructor(
     private readonly bookingService: BookingApplicationService,
@@ -76,9 +79,10 @@ export class BookingSagaService implements OnModuleInit, OnModuleDestroy {
       idempotencyKey: randomUUID(),
     };
 
+    const correlationId = getCorrelationId();
     try {
       await this.paymentCommandBreaker.execute(() =>
-        withRetryBackoff(() => this.paymentCommands.publishPaymentRequested(message), {
+        withRetryBackoff(() => this.paymentCommands.publishPaymentRequested(message, correlationId), {
           maxAttempts: 3,
           baseDelayMs: 100,
           maxDelayMs: 1_000,
@@ -103,7 +107,17 @@ export class BookingSagaService implements OnModuleInit, OnModuleDestroy {
 
   private async handleGatewayResponse(message: ConsumedMessage): Promise<void> {
     if (!message.value) return;
-    const payload = JSON.parse(message.value) as PaymentGatewayRespondedMessage;
+    // Re-enter the originating request's correlation context (carried as a
+    // Kafka header by PaymentCommandPublisher/KafkaResponsePublisher) so
+    // every log line from this point on -- including inside
+    // confirmPayment -- is attributable to the same trace, even though
+    // we're now running in a Kafka consumer callback, not an HTTP request.
+    const correlationId = message.headers.correlationId ?? randomUUID();
+    await correlationStorage.run({ correlationId }, () => this.processGatewayResponse(message.value!));
+  }
+
+  private async processGatewayResponse(rawValue: string): Promise<void> {
+    const payload = JSON.parse(rawValue) as PaymentGatewayRespondedMessage;
 
     try {
       await this.bookingService.confirmPayment(payload.bookingId, payload.outcome, payload.idempotencyKey);

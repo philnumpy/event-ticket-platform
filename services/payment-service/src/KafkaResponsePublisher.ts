@@ -5,10 +5,19 @@ import { ResponsePublisher } from './paymentRequestHandler';
 export class KafkaResponsePublisher implements ResponsePublisher {
   constructor(private readonly producer: Producer) {}
 
-  async publishPaymentGatewayResponded(message: PaymentGatewayRespondedMessage): Promise<void> {
+  async publishPaymentGatewayResponded(
+    message: PaymentGatewayRespondedMessage,
+    correlationId?: string,
+  ): Promise<void> {
     await this.producer.send({
       topic: PAYMENT_GATEWAY_RESPONDED_TOPIC,
-      messages: [{ key: message.bookingId, value: JSON.stringify(message) }],
+      messages: [
+        {
+          key: message.bookingId,
+          value: JSON.stringify(message),
+          headers: correlationId ? { correlationId } : undefined,
+        },
+      ],
     });
   }
 }

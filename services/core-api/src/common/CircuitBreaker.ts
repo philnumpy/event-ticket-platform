@@ -37,6 +37,12 @@ export class CircuitBreaker {
     private readonly name: string,
     private readonly options: CircuitBreakerOptions,
     private readonly clock: () => number = Date.now,
+    /** Optional hook for observability (e.g. a Prometheus counter) —
+     * called only when the state actually changes, not on every call.
+     * Kept as a plain callback rather than importing a metrics client
+     * directly, so this class stays a dependency-free, independently
+     * testable state machine. */
+    private readonly onStateChange?: (state: CircuitState) => void,
   ) {}
 
   getState(): CircuitState {
@@ -46,7 +52,7 @@ export class CircuitBreaker {
   async execute<T>(fn: () => Promise<T>): Promise<T> {
     if (this.state === 'OPEN') {
       if (this.clock() - (this.openedAt ?? 0) >= this.options.cooldownMs) {
-        this.state = 'HALF_OPEN';
+        this.setState('HALF_OPEN');
       } else {
         throw new CircuitBreakerOpenError(this.name);
       }
@@ -87,15 +93,22 @@ export class CircuitBreaker {
 
   private onSuccess(): void {
     this.consecutiveFailures = 0;
-    this.state = 'CLOSED';
+    this.setState('CLOSED');
     this.openedAt = null;
   }
 
   private onFailure(): void {
     this.consecutiveFailures++;
     if (this.state === 'HALF_OPEN' || this.consecutiveFailures >= this.options.failureThreshold) {
-      this.state = 'OPEN';
+      this.setState('OPEN');
       this.openedAt = this.clock();
+    }
+  }
+
+  private setState(next: CircuitState): void {
+    if (this.state !== next) {
+      this.state = next;
+      this.onStateChange?.(next);
     }
   }
 }

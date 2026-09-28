@@ -2,6 +2,7 @@ import { CanActivate, ExecutionContext, HttpException, HttpStatus, Inject, Injec
 import type { Request } from 'express';
 import { RateLimiter } from './RateLimiter';
 import { RATE_LIMITER } from './tokens';
+import { rateLimitRejectionsTotal } from '../metrics/metrics.registry';
 
 /**
  * Applied globally (see common.module.ts) — every request spends one token
@@ -25,6 +26,7 @@ export class TokenBucketGuard implements CanActivate {
     try {
       const result = await this.limiter.tryConsume(key);
       if (!result.allowed) {
+        rateLimitRejectionsTotal.inc();
         throw new HttpException('Too Many Requests', HttpStatus.TOO_MANY_REQUESTS);
       }
       return true;

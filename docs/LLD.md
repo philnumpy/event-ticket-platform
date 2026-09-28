@@ -655,8 +655,49 @@ became asynchronous.
 - `idempotency.e2e.spec.ts` — replay, independent keys, no-header
   passthrough, and the concurrent-duplicate race.
 
+### Observability
+
+Full rationale in [ADR 0006](adr/0006-observability.md).
+`CorrelationIdMiddleware` + `AsyncLocalStorage` (`correlation-context.ts`)
+give every request a trace ID, readable from anywhere in its async call
+chain without threading it through function signatures. `AppLogger`
+(`pino`, replacing Nest's default console logger) attaches it to every
+JSON log line. The ID is deliberately re-propagated as a Kafka message
+header at each process boundary — `core-api → payment-service →
+core-api → notification-service` — since `AsyncLocalStorage` context
+doesn't survive a trip over the network on its own.
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant CoreAPI as core-api
+    participant Kafka
+    participant PaymentSvc as payment-service
+    participant NotifSvc as notification-service
+
+    Client->>CoreAPI: POST /bookings (no X-Correlation-Id)
+    Note over CoreAPI: mint "trace-1", store in AsyncLocalStorage
+    CoreAPI->>Kafka: payment.requested (header: trace-1)
+    Kafka->>PaymentSvc: payment.requested
+    Note over PaymentSvc: log {correlationId: "trace-1", ...}
+    PaymentSvc->>Kafka: payment.gateway.responded (header: trace-1)
+    Kafka->>CoreAPI: payment.gateway.responded
+    Note over CoreAPI: re-enter AsyncLocalStorage with "trace-1"<br/>before calling confirmPayment
+    CoreAPI->>Kafka: booking.confirmed (outbox, header: trace-1)
+    Kafka->>NotifSvc: booking.confirmed
+    Note over NotifSvc: log {correlationId: "trace-1", ...}
+    CoreAPI-->>Client: 201 (header: X-Correlation-Id: trace-1)
+```
+
+`GET /metrics` exposes Prometheus text format: default Node process
+metrics, HTTP request duration/count, rate-limiter rejections, and circuit
+-breaker state transitions — each wired via an optional callback
+(`CircuitBreaker`'s `onStateChange`, `OutboxEventPublisher`'s
+`getCorrelationId`) rather than an import inside the mechanism itself, so
+the resilience/outbox code stays decoupled from whichever observability
+backend is or isn't watching it.
+
 ---
 
 *Phase 5 adds: k6 load tests (flash-sale scenario, with/without caching),
-structured logging with correlation IDs, Prometheus metrics, and the full
-HLD/ADR/API documentation set.*
+and the full HLD/ADR/API documentation set.*

@@ -10,7 +10,7 @@ import {
   InMemoryShowSeatRepository,
   InMemoryVenueRepository,
 } from '@etp/domain';
-import { InMemoryOutboxRepository, KafkaEventPublisher } from '@etp/messaging';
+import { InMemoryOutboxRepository, KafkaEventPublisher, OutboxRepository } from '@etp/messaging';
 import { AppModule } from '../src/app.module';
 import { DomainExceptionFilter } from '../src/common/domain-exception.filter';
 import {
@@ -45,6 +45,7 @@ export interface TestApp {
   payments: InMemoryPaymentRepository;
   redis: FakeRedis;
   outbox: NoopEventPublisher;
+  outboxRepository: OutboxRepository;
   paymentCommands: NoopPaymentCommandPublisher;
   paymentResponses: NoopResponseConsumer;
 }
@@ -77,6 +78,7 @@ export async function buildTestApp(options: BuildTestAppOptions = {}): Promise<T
   const payments = new InMemoryPaymentRepository();
   const redis = new FakeRedis();
   const outbox = new NoopEventPublisher();
+  const outboxRepository = new InMemoryOutboxRepository();
   const paymentCommands = new NoopPaymentCommandPublisher();
   const paymentResponses = new NoopResponseConsumer();
   const rateLimiter =
@@ -105,7 +107,7 @@ export async function buildTestApp(options: BuildTestAppOptions = {}): Promise<T
     .overrideProvider(PAYMENT_REPOSITORY)
     .useValue(payments)
     .overrideProvider(OUTBOX_REPOSITORY)
-    .useValue(new InMemoryOutboxRepository())
+    .useValue(outboxRepository)
     .overrideProvider(KafkaEventPublisher)
     .useValue(outbox)
     .overrideProvider(PAYMENT_COMMAND_PUBLISHER)
@@ -137,6 +139,7 @@ export async function buildTestApp(options: BuildTestAppOptions = {}): Promise<T
     payments,
     redis,
     outbox,
+    outboxRepository,
     paymentCommands,
     paymentResponses,
   };

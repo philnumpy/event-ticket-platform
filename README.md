@@ -5,7 +5,8 @@ portfolio project. Every non-trivial decision is documented as an ADR in
 [docs/adr](docs/adr) so the project can be defended in a system design
 interview, not just demoed.
 
-**Status:** Phase 4 of 5 (gateway, rate limiting, resilience) — see
+**Status:** Phase 4 of 5 complete (gateway, rate limiting, resilience,
+observability) — see
 [docs/LLD.md](docs/LLD.md) and [docs/adr](docs/adr) as they land, phase by
 phase. [docs/HLD.md](docs/HLD.md) lands in Phase 5.
 
@@ -87,6 +88,9 @@ curl -s -X POST localhost:3000/admin/venues/$VENUE/seats \
 Add an `Idempotency-Key: <uuid>` header to any POST to get safe-retry
 semantics; requests are also rate-limited per client IP (token bucket,
 `services/core-api/src/common/rate-limit`), returning `429` once exhausted.
+Every response carries an `X-Correlation-Id` header (reuse your own by
+sending it as a request header); `GET /metrics` exposes Prometheus text
+format for `core-api`.
 
 ### Testcontainers integration tests
 
@@ -121,6 +125,6 @@ catch it parsing and resolving cleanly — a smaller but real signal short
 of actually running it.
 
 Everything else is green and runs on in-memory/fake adapters with no
-external infrastructure: 244 tests across `domain` (140), `messaging`
-(11), `persistence`'s Docker-free suite (5), `core-api` (62),
-`payment-service` (13), and `notification-service` (13).
+external infrastructure: 261 tests across `domain` (140), `messaging`
+(17), `persistence`'s Docker-free suite (5), `core-api` (71),
+`payment-service` (15), and `notification-service` (13).

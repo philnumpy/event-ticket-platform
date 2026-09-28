@@ -16,6 +16,7 @@ export class NoopEventPublisher implements EventPublisherPort {
 
 export class NoopPaymentCommandPublisher implements PaymentCommandPublisher {
   readonly requested: PaymentRequestedMessage[] = [];
+  readonly correlationIds: Array<string | undefined> = [];
   /** Flip on mid-test to simulate Kafka/payment-service being unreachable,
    * and prove BookingSagaService degrades gracefully instead of failing
    * the booking request that triggered it. */
@@ -25,11 +26,12 @@ export class NoopPaymentCommandPublisher implements PaymentCommandPublisher {
 
   async disconnect(): Promise<void> {}
 
-  async publishPaymentRequested(message: PaymentRequestedMessage): Promise<void> {
+  async publishPaymentRequested(message: PaymentRequestedMessage, correlationId?: string): Promise<void> {
     if (this.shouldFail) {
       throw new Error('simulated Kafka/payment-service unavailability');
     }
     this.requested.push(message);
+    this.correlationIds.push(correlationId);
   }
 }
 

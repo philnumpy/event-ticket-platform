@@ -13,6 +13,7 @@ import {
 import { DomainModule } from '../persistence/domain.module';
 import { DOMAIN_EVENT_PUBLISHER, PRISMA_CLIENT } from '../persistence/tokens';
 import { OUTBOX_RELAY, OUTBOX_REPOSITORY } from './tokens';
+import { getCorrelationId } from '../common/observability/correlation-context';
 
 const OUTBOX_POLL_INTERVAL_MS = Number(process.env.OUTBOX_POLL_INTERVAL_MS ?? 1_000);
 
@@ -55,7 +56,7 @@ export class MessagingModule implements OnModuleInit, OnModuleDestroy {
   ) {}
 
   onModuleInit(): void {
-    new OutboxEventPublisher(this.outbox).register(this.domainEvents);
+    new OutboxEventPublisher(this.outbox, getCorrelationId).register(this.domainEvents);
     this.relay.start();
   }
 

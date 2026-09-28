@@ -2,6 +2,7 @@ import { createKafkaClient, KafkaConsumerRunner } from '@etp/messaging';
 import { ConsoleNotificationSender } from './NotificationSender';
 import { handleNotificationEvent, loadNotificationHandlerConfigFromEnv } from './notificationEventHandler';
 import { NOTIFICATION_TOPICS, topicToEventType } from './topics';
+import { logger } from './logger';
 
 async function main(): Promise<void> {
   const config = loadNotificationHandlerConfigFromEnv();
@@ -16,12 +17,17 @@ async function main(): Promise<void> {
   await consumer.start(async (message) => {
     if (!message.value) return;
     const eventType = topicToEventType(message.topic);
+    // Propagated all the way from the originating HTTP request via
+    // core-api's outbox (OutboxEventPublisher captures it,
+    // KafkaEventPublisher carries it as a header) -- this is the far end
+    // of that trace.
+    const correlationId = message.headers.correlationId;
     const payload = JSON.parse(message.value);
-    await handleNotificationEvent(eventType, payload, sender, config);
+    const notification = await handleNotificationEvent(eventType, payload, sender, config);
+    logger.info({ correlationId, eventType, notification }, 'processed notification event');
   });
 
-  // eslint-disable-next-line no-console
-  console.log('notification-service consuming', NOTIFICATION_TOPICS, 'with config', config);
+  logger.info({ topics: NOTIFICATION_TOPICS, config }, 'notification-service consuming');
 
   const shutdown = async () => {
     await consumer.stop();
@@ -32,7 +38,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((err) => {
-  // eslint-disable-next-line no-console
-  console.error('notification-service failed to start', err);
+  logger.error({ err }, 'notification-service failed to start');
   process.exit(1);
 });

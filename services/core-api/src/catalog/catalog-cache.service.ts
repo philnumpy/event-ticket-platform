@@ -14,6 +14,7 @@ import {
 } from '@etp/domain';
 import { DOMAIN_EVENT_PUBLISHER, REDIS_CLIENT } from '../persistence/tokens';
 import { CircuitBreaker } from '../common/CircuitBreaker';
+import { circuitBreakerTransitionsTotal } from '../common/metrics/metrics.registry';
 
 const BROWSE_TTL_SECONDS = 30;
 // Seat-map entries are read far more often than they change during a flash
@@ -48,11 +49,12 @@ const STAMPEDE_RETRY_DELAY_MS = 50;
  */
 @Injectable()
 export class CatalogCacheService implements OnModuleInit {
-  private readonly redisBreaker = new CircuitBreaker('catalog-redis', {
-    failureThreshold: 5,
-    cooldownMs: 10_000,
-    timeoutMs: 200,
-  });
+  private readonly redisBreaker = new CircuitBreaker(
+    'catalog-redis',
+    { failureThreshold: 5, cooldownMs: 10_000, timeoutMs: 200 },
+    undefined,
+    (state) => circuitBreakerTransitionsTotal.inc({ breaker: 'catalog-redis', state }),
+  );
 
   constructor(
     private readonly catalog: CatalogQueryService,

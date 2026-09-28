@@ -7,6 +7,7 @@ export class InMemoryOutboxRepository implements OutboxRepository {
   async save(record: NewOutboxRecord): Promise<void> {
     this.store.set(record.id, {
       ...record,
+      correlationId: record.correlationId ?? null,
       publishedAt: null,
       attempts: 0,
       lastError: null,

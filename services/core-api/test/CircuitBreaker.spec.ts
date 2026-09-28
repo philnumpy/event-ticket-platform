@@ -66,4 +66,26 @@ describe('CircuitBreaker', () => {
     ).rejects.toThrow('timed out');
     expect(breaker.getState()).toBe('OPEN');
   });
+
+  it('calls onStateChange only when the state actually changes, not on every successful call', async () => {
+    const transitions: string[] = [];
+    let now = 0;
+    const breaker = new CircuitBreaker(
+      'test',
+      { failureThreshold: 1, cooldownMs: 1000 },
+      () => now,
+      (state) => transitions.push(state),
+    );
+
+    await breaker.execute(async () => 'ok'); // already CLOSED -- no transition
+    await breaker.execute(async () => 'ok');
+    expect(transitions).toEqual([]);
+
+    await expect(breaker.execute(async () => { throw new Error('boom'); })).rejects.toThrow();
+    expect(transitions).toEqual(['OPEN']);
+
+    now += 1000;
+    await breaker.execute(async () => 'recovered'); // enters HALF_OPEN for the probe, then closes on success
+    expect(transitions).toEqual(['OPEN', 'HALF_OPEN', 'CLOSED']);
+  });
 });

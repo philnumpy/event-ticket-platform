@@ -4,9 +4,14 @@ import { MockGatewayConfig } from '../src/mockGateway';
 
 class RecordingResponsePublisher implements ResponsePublisher {
   readonly responses: PaymentGatewayRespondedMessage[] = [];
+  readonly correlationIds: Array<string | undefined> = [];
 
-  async publishPaymentGatewayResponded(message: PaymentGatewayRespondedMessage): Promise<void> {
+  async publishPaymentGatewayResponded(
+    message: PaymentGatewayRespondedMessage,
+    correlationId?: string,
+  ): Promise<void> {
     this.responses.push(message);
+    this.correlationIds.push(correlationId);
   }
 }
 
@@ -79,5 +84,31 @@ describe('handlePaymentRequested', () => {
     });
 
     expect(publisher.responses[0]?.outcome).toBe('FAILED');
+  });
+
+  it('propagates the correlation ID to every published response, including duplicates', async () => {
+    const publisher = new RecordingResponsePublisher();
+    const alwaysDuplicateConfig: MockGatewayConfig = { ...noDuplicateConfig, duplicateCallbackRate: 1 };
+
+    await handlePaymentRequested(
+      baseRequest,
+      alwaysDuplicateConfig,
+      publisher,
+      { random: () => 0.99, sleep: async () => undefined },
+      'trace-abc',
+    );
+
+    expect(publisher.correlationIds).toEqual(['trace-abc', 'trace-abc']);
+  });
+
+  it('passes undefined correlationId through when none was supplied', async () => {
+    const publisher = new RecordingResponsePublisher();
+
+    await handlePaymentRequested(baseRequest, noDuplicateConfig, publisher, {
+      random: () => 0.9,
+      sleep: async () => undefined,
+    });
+
+    expect(publisher.correlationIds).toEqual([undefined]);
   });
 });

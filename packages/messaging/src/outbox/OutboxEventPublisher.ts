@@ -20,7 +20,14 @@ import { OutboxRepository } from './OutboxRepository';
  * project's scope, and what closes the gap at 100x scale (CDC on the WAL).
  */
 export class OutboxEventPublisher {
-  constructor(private readonly outbox: OutboxRepository) {}
+  constructor(
+    private readonly outbox: OutboxRepository,
+    /** Deliberately a plain callback, not a direct dependency on
+     * core-api's AsyncLocalStorage-based correlation context: this package
+     * has no business knowing HTTP requests exist. The caller (core-api's
+     * MessagingModule) decides where a correlation ID comes from. */
+    private readonly getCorrelationId: () => string | undefined = () => undefined,
+  ) {}
 
   register(publisher: DomainEventPublisher): void {
     for (const eventType of ALL_BOOKING_EVENT_TYPES) {
@@ -30,6 +37,7 @@ export class OutboxEventPublisher {
           type: event.type,
           payload: event.payload,
           occurredAt: event.occurredAt,
+          correlationId: this.getCorrelationId() ?? null,
         });
       });
     }

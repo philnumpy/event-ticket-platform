@@ -2,7 +2,7 @@ import type { Producer } from 'kafkajs';
 import { PAYMENT_REQUESTED_TOPIC, PaymentRequestedMessage } from '@etp/messaging';
 
 export interface PaymentCommandPublisher {
-  publishPaymentRequested(message: PaymentRequestedMessage): Promise<void>;
+  publishPaymentRequested(message: PaymentRequestedMessage, correlationId?: string): Promise<void>;
   connect(): Promise<void>;
   disconnect(): Promise<void>;
 }
@@ -29,11 +29,17 @@ export class KafkaPaymentCommandPublisher implements PaymentCommandPublisher {
     }
   }
 
-  async publishPaymentRequested(message: PaymentRequestedMessage): Promise<void> {
+  async publishPaymentRequested(message: PaymentRequestedMessage, correlationId?: string): Promise<void> {
     await this.connect();
     await this.producer.send({
       topic: PAYMENT_REQUESTED_TOPIC,
-      messages: [{ key: message.bookingId, value: JSON.stringify(message) }],
+      messages: [
+        {
+          key: message.bookingId,
+          value: JSON.stringify(message),
+          headers: correlationId ? { correlationId } : undefined,
+        },
+      ],
     });
   }
 }

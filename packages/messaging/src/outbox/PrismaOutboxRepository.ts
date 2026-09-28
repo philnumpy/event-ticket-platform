@@ -11,6 +11,7 @@ interface OutboxEventRecord {
   attempts: number;
   lastError: string | null;
   deadLetteredAt: Date | null;
+  correlationId: string | null;
 }
 
 export class PrismaOutboxRepository implements OutboxRepository {
@@ -23,6 +24,7 @@ export class PrismaOutboxRepository implements OutboxRepository {
         type: record.type,
         payload: record.payload as object,
         occurredAt: record.occurredAt,
+        correlationId: record.correlationId ?? null,
       },
     });
   }
@@ -67,6 +69,7 @@ export class PrismaOutboxRepository implements OutboxRepository {
       attempts: record.attempts,
       lastError: record.lastError,
       deadLetteredAt: record.deadLetteredAt,
+      correlationId: record.correlationId,
     };
   }
 }

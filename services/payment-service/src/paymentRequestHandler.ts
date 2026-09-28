@@ -3,7 +3,7 @@ import { PaymentGatewayRespondedMessage, PaymentRequestedMessage } from '@etp/me
 import { decideOutcome, GatewayDecision, MockGatewayConfig } from './mockGateway';
 
 export interface ResponsePublisher {
-  publishPaymentGatewayResponded(message: PaymentGatewayRespondedMessage): Promise<void>;
+  publishPaymentGatewayResponded(message: PaymentGatewayRespondedMessage, correlationId?: string): Promise<void>;
 }
 
 export interface PaymentRequestHandlerDeps {
@@ -26,6 +26,7 @@ export async function handlePaymentRequested(
   config: MockGatewayConfig,
   publisher: ResponsePublisher,
   deps: PaymentRequestHandlerDeps = {},
+  correlationId?: string,
 ): Promise<GatewayDecision> {
   const decision = decideOutcome(config, deps.random);
   await (deps.sleep ?? sleep)(decision.delayMs);
@@ -36,9 +37,9 @@ export async function handlePaymentRequested(
     outcome: decision.outcome,
   };
 
-  await publisher.publishPaymentGatewayResponded(response);
+  await publisher.publishPaymentGatewayResponded(response, correlationId);
   if (decision.duplicateCallback) {
-    await publisher.publishPaymentGatewayResponded(response);
+    await publisher.publishPaymentGatewayResponded(response, correlationId);
   }
 
   return decision;

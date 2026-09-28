@@ -2,6 +2,7 @@ import { createKafkaClient, KafkaConsumerRunner, PAYMENT_REQUESTED_TOPIC, Paymen
 import { KafkaResponsePublisher } from './KafkaResponsePublisher';
 import { handlePaymentRequested } from './paymentRequestHandler';
 import { loadMockGatewayConfigFromEnv } from './mockGateway';
+import { logger } from './logger';
 
 async function main(): Promise<void> {
   const config = loadMockGatewayConfigFromEnv();
@@ -18,16 +19,19 @@ async function main(): Promise<void> {
   await consumer.start(async (message) => {
     if (!message.value) return;
     const request = JSON.parse(message.value) as PaymentRequestedMessage;
-    const decision = await handlePaymentRequested(request, config, publisher);
-    // eslint-disable-next-line no-console
-    console.log(
-      `[payment-service] booking=${request.bookingId} outcome=${decision.outcome} ` +
-        `duplicateCallback=${decision.duplicateCallback} delayMs=${decision.delayMs}`,
+    // Propagated from core-api's BookingSagaService (which read it from the
+    // original HTTP request's correlation context) so this decision is
+    // attributable to the same trace, even though it's happening in an
+    // entirely separate process reached only via Kafka.
+    const correlationId = message.headers.correlationId;
+    const decision = await handlePaymentRequested(request, config, publisher, {}, correlationId);
+    logger.info(
+      { correlationId, bookingId: request.bookingId, ...decision },
+      'processed payment.requested',
     );
   });
 
-  // eslint-disable-next-line no-console
-  console.log('payment-service consuming', PAYMENT_REQUESTED_TOPIC, 'with config', config);
+  logger.info({ topic: PAYMENT_REQUESTED_TOPIC, config }, 'payment-service consuming');
 
   const shutdown = async () => {
     await consumer.stop();
@@ -39,7 +43,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((err) => {
-  // eslint-disable-next-line no-console
-  console.error('payment-service failed to start', err);
+  logger.error({ err }, 'payment-service failed to start');
   process.exit(1);
 });

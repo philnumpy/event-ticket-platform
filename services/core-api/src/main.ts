@@ -4,9 +4,12 @@ import { NestExpressApplication } from '@nestjs/platform-express';
 import { ValidationPipe } from '@nestjs/common';
 import { AppModule } from './app.module';
 import { DomainExceptionFilter } from './common/domain-exception.filter';
+import { AppLogger } from './common/observability/app-logger.service';
 
 async function bootstrap(): Promise<void> {
-  const app = await NestFactory.create<NestExpressApplication>(AppModule);
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, {
+    logger: new AppLogger(),
+  });
 
   // Behind Nginx (docker-compose.yml / nginx/nginx.conf), the direct socket
   // peer for every request is the Nginx container, not the real client --

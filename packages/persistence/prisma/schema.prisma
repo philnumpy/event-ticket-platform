@@ -202,6 +202,10 @@ model OutboxEvent {
   attempts       Int       @default(0)
   lastError      String?
   deadLetteredAt DateTime?
+  // The originating HTTP request's correlation ID, if any (see
+  // CorrelationIdMiddleware) -- carried to Kafka as a message header so a
+  // trace survives the outbox hop.
+  correlationId  String?
 
   @@index([publishedAt, deadLetteredAt, occurredAt])
   @@map("outbox_events")
