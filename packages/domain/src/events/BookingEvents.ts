@@ -5,6 +5,19 @@ export const BOOKING_EXPIRED = 'booking.expired';
 export const PAYMENT_FAILED = 'payment.failed';
 export const REFUND_PROCESSED = 'refund.processed';
 
+/** Every event type BookingApplicationService can publish — used by
+ * subscribers (the outbox relay, in particular) that care about all of
+ * them rather than picking specific ones the way NotificationDispatcher or
+ * cache invalidation do. */
+export const ALL_BOOKING_EVENT_TYPES = [
+  SEATS_HELD,
+  BOOKING_CONFIRMED,
+  BOOKING_CANCELLED,
+  BOOKING_EXPIRED,
+  PAYMENT_FAILED,
+  REFUND_PROCESSED,
+] as const;
+
 // Every payload below carries showId, even where the booking/hold id alone
 // would identify the record — subscribers that only care about a show's
 // aggregate state (cache invalidation, live seat-map dashboards) would

@@ -8,7 +8,6 @@ import {
   EventCatalogRepository,
   FlatPricingStrategy,
   HoldRepository,
-  NotificationDispatcher,
   PaymentRepository,
   RefundPolicySelector,
   SeatHoldService,
@@ -55,15 +54,16 @@ const HOLD_TTL_SECONDS = Number(process.env.HOLD_TTL_SECONDS ?? 300);
       useFactory: () => new RefundPolicySelector(),
     },
     {
+      // Subscribers register themselves onto this instance from wherever
+      // they live: CatalogCacheService (catalog module) and
+      // OutboxEventPublisher (MessagingModule) both do so in their own
+      // onModuleInit, rather than this factory needing to know about them.
+      // Phase 1's NotificationDispatcher is the domain package's own
+      // Observer-pattern demonstration and stays fully tested there; it's
+      // no longer wired into the running app now that notification-service
+      // is the real subscriber, reached via the outbox + Kafka instead.
       provide: DOMAIN_EVENT_PUBLISHER,
-      useFactory: () => {
-        const publisher = new DomainEventPublisher();
-        // Phase 1's in-memory notification stub, still wired in Phase 3 —
-        // the outbox-backed Kafka publisher (also subscribed here) adds a
-        // second, real subscriber without touching this line.
-        new NotificationDispatcher().register(publisher);
-        return publisher;
-      },
+      useFactory: () => new DomainEventPublisher(),
     },
     {
       provide: SEAT_HOLD_SERVICE,

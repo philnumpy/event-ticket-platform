@@ -188,3 +188,21 @@ model Payment {
   @@index([bookingId])
   @@map("payments")
 }
+
+// The outbox: BookingApplicationService's domain events land here (via
+// OutboxEventPublisher, an Observer on the same DomainEventPublisher every
+// other subscriber uses) and OutboxRelay polls, forwards to Kafka, and
+// marks published. See docs/adr/0004-outbox-and-async-delivery.md.
+model OutboxEvent {
+  id             String    @id
+  type           String
+  payload        Json
+  occurredAt     DateTime
+  publishedAt    DateTime?
+  attempts       Int       @default(0)
+  lastError      String?
+  deadLetteredAt DateTime?
+
+  @@index([publishedAt, deadLetteredAt, occurredAt])
+  @@map("outbox_events")
+}
