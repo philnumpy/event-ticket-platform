@@ -13,6 +13,7 @@ import {
   ShowSeat,
 } from '@etp/domain';
 import { DOMAIN_EVENT_PUBLISHER, REDIS_CLIENT } from '../persistence/tokens';
+import { CircuitBreaker } from '../common/CircuitBreaker';
 
 const BROWSE_TTL_SECONDS = 30;
 // Seat-map entries are read far more often than they change during a flash
@@ -24,7 +25,8 @@ const STAMPEDE_RETRY_ATTEMPTS = 10;
 const STAMPEDE_RETRY_DELAY_MS = 50;
 
 /**
- * Cache-aside over CatalogQueryService, with two deliberate design choices:
+ * Cache-aside over CatalogQueryService, with three deliberate design
+ * choices:
  *
  * 1. Stampede protection: on a cache miss, the first caller takes a short
  *    Redis lock and computes the value; every other concurrent caller for
@@ -38,9 +40,20 @@ const STAMPEDE_RETRY_DELAY_MS = 50;
  *    publishes to (Observer pattern, Phase 1), so a seat's availability
  *    changing invalidates its show's seat-map cache with no coupling
  *    between the booking flow and this cache's existence.
+ * 3. Every Redis call is guarded by a circuit breaker that falls back to
+ *    calling `compute()` directly. Caching exists to reduce database load,
+ *    not to become a second thing that has to be up for the platform to
+ *    serve reads — if Redis is down, browse/seat-map endpoints degrade to
+ *    hitting Postgres on every request rather than failing outright.
  */
 @Injectable()
 export class CatalogCacheService implements OnModuleInit {
+  private readonly redisBreaker = new CircuitBreaker('catalog-redis', {
+    failureThreshold: 5,
+    cooldownMs: 10_000,
+    timeoutMs: 200,
+  });
+
   constructor(
     private readonly catalog: CatalogQueryService,
     @Inject(REDIS_CLIENT) private readonly redis: Redis,
@@ -66,7 +79,14 @@ export class CatalogCacheService implements OnModuleInit {
   }
 
   async invalidateSeatMap(showId: string): Promise<void> {
-    await this.redis.del(this.seatMapKey(showId));
+    try {
+      await this.redisBreaker.execute(() => this.redis.del(this.seatMapKey(showId)));
+    } catch {
+      // Best-effort: if Redis is unavailable, the short TTL above still
+      // bounds staleness once it recovers. Failing the booking write that
+      // triggered this invalidation would be strictly worse than a seat-map
+      // read staying stale for a few seconds.
+    }
   }
 
   private seatMapKey(showId: string): string {
@@ -74,35 +94,60 @@ export class CatalogCacheService implements OnModuleInit {
   }
 
   private async cacheAside<T>(key: string, ttlSeconds: number, compute: () => Promise<T>): Promise<T> {
-    const cached = await this.redis.get(key);
+    let cached: string | null;
+    try {
+      cached = await this.redisBreaker.execute(() => this.redis.get(key));
+    } catch {
+      return compute(); // Redis unavailable -- degrade to a direct read
+    }
     if (cached) {
       return JSON.parse(cached) as T;
     }
 
     const lockKey = `lock:${key}`;
-    const acquiredLock = await this.redis.set(lockKey, '1', 'PX', LOCK_TTL_MS, 'NX');
+    let acquiredLock: 'OK' | null;
+    try {
+      acquiredLock = await this.redisBreaker.execute(() => this.redis.set(lockKey, '1', 'PX', LOCK_TTL_MS, 'NX'));
+    } catch {
+      return compute(); // can't coordinate the stampede lock -- compute directly
+    }
 
     if (acquiredLock !== 'OK') {
       // Someone else is already computing this key. Wait for them instead
       // of also querying the database.
       for (let attempt = 0; attempt < STAMPEDE_RETRY_ATTEMPTS; attempt++) {
         await sleep(STAMPEDE_RETRY_DELAY_MS);
-        const retryValue = await this.redis.get(key);
+        let retryValue: string | null;
+        try {
+          retryValue = await this.redisBreaker.execute(() => this.redis.get(key));
+        } catch {
+          break; // Redis died mid-wait -- stop polling it, compute ourselves
+        }
         if (retryValue) {
           return JSON.parse(retryValue) as T;
         }
       }
-      // Gave up waiting (the lock holder is unusually slow or crashed) --
-      // compute it ourselves rather than fail the request.
+      // Gave up waiting (the lock holder is unusually slow, crashed, or
+      // Redis itself just failed) -- compute it ourselves rather than fail
+      // the request.
       return compute();
     }
 
     try {
       const value = await compute();
-      await this.redis.set(key, JSON.stringify(value), 'EX', ttlSeconds);
+      try {
+        await this.redisBreaker.execute(() => this.redis.set(key, JSON.stringify(value), 'EX', ttlSeconds));
+      } catch {
+        // Best-effort: serving this request correctly matters more than
+        // populating the cache for the next one.
+      }
       return value;
     } finally {
-      await this.redis.del(lockKey);
+      try {
+        await this.redisBreaker.execute(() => this.redis.del(lockKey));
+      } catch {
+        // The lock's own PX TTL reclaims it either way.
+      }
     }
   }
 

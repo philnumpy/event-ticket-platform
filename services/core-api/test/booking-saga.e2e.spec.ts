@@ -105,4 +105,31 @@ describe('BookingSagaService', () => {
     const booking = await testApp.bookings.findById(bookingId);
     expect(booking?.state).toBe('CONFIRMED'); // not corrupted by processing it twice
   });
+
+  it('degrades gracefully when Kafka/payment-service is unreachable: the booking still succeeds', async () => {
+    await seedShow(testApp, { showId: 'show-saga-5', seatIds: ['seat-1'] });
+    testApp.paymentCommands.shouldFail = true;
+
+    try {
+      const initiate = await request(testApp.app.getHttpServer())
+        .post('/bookings')
+        .send({ userId: 'user-1', showId: 'show-saga-5', seatIds: ['seat-1'] });
+
+      // The seat hold succeeded and was durably persisted -- that must not
+      // be undone just because the saga couldn't tell payment-service
+      // about it. Retrying with backoff inside a circuit breaker means this
+      // takes a little real time (a few hundred ms), not that it fails.
+      expect(initiate.status).toBe(201);
+      expect(initiate.body.booking.state).toBe('HELD');
+
+      // Nothing was ever successfully published -- this booking will rely
+      // on HoldExpirySweep, exactly like a payment-service that received
+      // the request but crashed before responding.
+      expect(
+        testApp.paymentCommands.requested.some((m) => m.bookingId === initiate.body.booking.id),
+      ).toBe(false);
+    } finally {
+      testApp.paymentCommands.shouldFail = false;
+    }
+  }, 10_000);
 });

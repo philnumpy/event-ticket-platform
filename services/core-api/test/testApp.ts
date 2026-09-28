@@ -104,6 +104,10 @@ export async function buildTestApp(): Promise<TestApp> {
   app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
   app.useGlobalFilters(new DomainExceptionFilter());
   await app.init();
+  // Tests fire many concurrent supertest requests at one server instance
+  // (e.g. the idempotency-claim race test) -- harmless in practice, but
+  // raise the limit so it doesn't print a spurious leak warning.
+  app.getHttpServer().setMaxListeners(50);
 
   return {
     app,

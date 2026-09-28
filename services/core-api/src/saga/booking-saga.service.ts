@@ -6,6 +6,8 @@ import { BOOKING_REPOSITORY, DOMAIN_EVENT_PUBLISHER } from '../persistence/token
 import { PAYMENT_COMMAND_PUBLISHER, PAYMENT_RESPONSE_CONSUMER } from './tokens';
 import { PaymentCommandPublisher } from './PaymentCommandPublisher';
 import { ResponseConsumer } from './ResponseConsumer';
+import { CircuitBreaker } from '../common/CircuitBreaker';
+import { withRetryBackoff } from '../common/retryWithBackoff';
 
 /**
  * The saga orchestrator ADR 0001 named but hadn't been built yet: reacts to
@@ -29,6 +31,11 @@ import { ResponseConsumer } from './ResponseConsumer';
 @Injectable()
 export class BookingSagaService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(BookingSagaService.name);
+  private readonly paymentCommandBreaker = new CircuitBreaker('payment-command-publisher', {
+    failureThreshold: 5,
+    cooldownMs: 30_000,
+    timeoutMs: 5_000,
+  });
 
   constructor(
     private readonly bookingService: BookingApplicationService,
@@ -69,7 +76,29 @@ export class BookingSagaService implements OnModuleInit, OnModuleDestroy {
       idempotencyKey: randomUUID(),
     };
 
-    await this.paymentCommands.publishPaymentRequested(message);
+    try {
+      await this.paymentCommandBreaker.execute(() =>
+        withRetryBackoff(() => this.paymentCommands.publishPaymentRequested(message), {
+          maxAttempts: 3,
+          baseDelayMs: 100,
+          maxDelayMs: 1_000,
+        }),
+      );
+    } catch (err) {
+      // Deliberately not rethrown. This handler runs synchronously inside
+      // initiateBooking's SEATS_HELD publish — the booking is already
+      // durably HELD, so letting this propagate would fail a booking
+      // request that actually succeeded, over a downstream dependency
+      // (Kafka/payment-service) the client had no way to know about.
+      // Graceful degradation here means exactly what it means for an
+      // answered-but-never-responded-to payment request: HoldExpirySweep
+      // compensates once the hold's TTL elapses. See ADR 0004.
+      const reason = err instanceof Error ? err.message : String(err);
+      this.logger.error(
+        `Failed to publish payment.requested for booking ${booking.id} ` +
+          `(circuit: ${this.paymentCommandBreaker.getState()}): ${reason}`,
+      );
+    }
   }
 
   private async handleGatewayResponse(message: ConsumedMessage): Promise<void> {
