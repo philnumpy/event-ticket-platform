@@ -50,13 +50,25 @@ services:
       timeout: 10s
       retries: 15
 
-  core-api:
+  # One-shot schema sync, run once before either core-api replica starts --
+  # see the comment in services/core-api/Dockerfile for why this isn't part
+  # of the app image's own startup command.
+  migrate:
     build:
       context: .
       dockerfile: services/core-api/Dockerfile
-    ports:
-      - "3000:3000"
+    command: sh -c "npx prisma db push --schema=/app/packages/persistence/prisma/schema.prisma --skip-generate --accept-data-loss"
     environment:
+      DATABASE_URL: postgresql://etp:etp@postgres:5432/etp
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  core-api-1: &core-api
+    build:
+      context: .
+      dockerfile: services/core-api/Dockerfile
+    environment: &core-api-env
       DATABASE_URL: postgresql://etp:etp@postgres:5432/etp
       REDIS_URL: redis://redis:6379
       KAFKA_BROKERS: kafka:9092
@@ -68,6 +80,24 @@ services:
         condition: service_healthy
       kafka:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  # Stateless (all state lives in Postgres/Redis/Kafka), so a second
+  # replica behind Nginx is exactly what proves core-api is safe to scale
+  # horizontally -- the point of the load balancer in front of it.
+  core-api-2:
+    <<: *core-api
+
+  nginx:
+    image: nginx:1.27-alpine
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - "3000:80"
+    depends_on:
+      - core-api-1
+      - core-api-2
 
   payment-service:
     build:

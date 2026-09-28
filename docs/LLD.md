@@ -581,6 +581,82 @@ part is unit-tested without a broker in either service.
 
 ---
 
-*Phase 4 adds: Nginx in front of multiple core-api replicas, rate limiting,
-idempotency-key middleware, circuit breakers on the payment call path, and
-structured logging with correlation IDs.*
+## Phase 4: gateway, rate limiting, resilience, API idempotency
+
+Full design rationale in
+[ADR 0005](adr/0005-rate-limiting-and-resilience.md); this section covers
+the resulting code structure.
+
+### Gateway
+
+```mermaid
+flowchart LR
+    Client -->|:3000| Nginx
+    Nginx -->|limit_req: leaky bucket,<br/>coarse first line of defense| CoreAPI1[core-api-1]
+    Nginx --> CoreAPI2[core-api-2]
+    CoreAPI1 --> TokenBucketGuard1[TokenBucketGuard:<br/>true token bucket, per-client]
+    CoreAPI2 --> TokenBucketGuard2[TokenBucketGuard]
+    TokenBucketGuard1 --> Redis[(Redis: Lua script)]
+    TokenBucketGuard2 --> Redis
+```
+
+`nginx/nginx.conf` load-balances (round robin — `core-api` is stateless by
+construction, so replica choice never matters) and applies a coarse
+`limit_req`. The platform's actual token-bucket requirement is
+`services/core-api/src/common/rate-limit`:
+`TokenBucketMath.refillAndConsume` is the pure algorithm,
+`InMemoryTokenBucketRateLimiter` and `RedisTokenBucketRateLimiter` (a Lua
+script, for the same atomicity reason `tryTransition` is a single SQL
+statement) are its two adapters, and `TokenBucketGuard` applies it
+globally, keyed per client IP — which requires `main.ts` to set
+`trust proxy` so `req.ip` reads `X-Forwarded-For` instead of Nginx's own
+container address.
+
+### API idempotency keys
+
+`IdempotencyInterceptor`, wired globally via `APP_INTERCEPTOR`, gives every
+POST endpoint opt-in `Idempotency-Key` support with no per-controller code.
+It's the same atomic-claim shape as `PaymentRepository.claim()` (ADR
+0003): `SET NX` picks one winner, concurrent duplicates wait on the
+result. See `test/idempotency.e2e.spec.ts` for the 10-concurrent-identical-
+requests proof.
+
+### Resilience
+
+`CircuitBreaker` (hand-rolled state machine: CLOSED → OPEN after N
+consecutive failures → HALF_OPEN probe after a cooldown) and
+`withRetryBackoff` (exponential backoff, composed *inside* a breaker's
+`execute()`, not a replacement for it) guard the two calls in this system
+that can actually fail and hang given Phase 3's async architecture:
+`BookingSagaService`'s Kafka publish, and `CatalogCacheService`'s Redis
+calls. Both fall back to a mechanism the platform already has — hold-
+expiry compensation, and direct-to-Postgres reads, respectively — rather
+than inventing a new failure mode. See ADR 0005 for why "circuit breaker on
+the payment call path" needed reinterpreting once payment processing
+became asynchronous.
+
+### Proof
+
+- `TokenBucketMath.spec.ts`, `InMemoryTokenBucketRateLimiter.spec.ts` — the
+  algorithm, including a 50-concurrent-request proof that exactly
+  `capacity` requests are let through for one key.
+- `RedisTokenBucketRateLimiter.spec.ts` — the Lua-script wrapper's
+  argument/result plumbing, verified against a fake `eval` running the
+  identical `refillAndConsume` function (the actual Lua text itself is
+  unverified pending Docker — see the README).
+- `TokenBucketGuard.spec.ts`, `rate-limit.e2e.spec.ts` — 429 behavior and
+  fail-open-on-Redis-failure, including a dedicated low-capacity app
+  instance so this doesn't make unrelated e2e tests flaky.
+- `CircuitBreaker.spec.ts`, `retryWithBackoff.spec.ts` — the state machine
+  and backoff math in isolation.
+- `catalog-cache.service.spec.ts`'s "graceful degradation" describe block,
+  `booking-saga.e2e.spec.ts`'s "degrades gracefully" test — the actual
+  fallback behavior, using fakes that fail on demand.
+- `idempotency.e2e.spec.ts` — replay, independent keys, no-header
+  passthrough, and the concurrent-duplicate race.
+
+---
+
+*Phase 5 adds: k6 load tests (flash-sale scenario, with/without caching),
+structured logging with correlation IDs, Prometheus metrics, and the full
+HLD/ADR/API documentation set.*

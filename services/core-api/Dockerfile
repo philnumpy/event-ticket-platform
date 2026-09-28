@@ -19,8 +19,10 @@ RUN npm run build --workspace services/core-api
 WORKDIR /app/services/core-api
 EXPOSE 3000
 
-# No versioned Prisma migrations exist yet (this project only ever ran
-# `prisma db push` against a live database -- see README); `db push`
-# applies the current schema directly. A production setup would replace
-# this with `prisma migrate deploy` against committed migration files.
-CMD sh -c "npx prisma db push --schema=/app/packages/persistence/prisma/schema.prisma --skip-generate --accept-data-loss && node dist/main.js"
+# Schema sync runs as its own one-shot `migrate` service in
+# docker-compose.yml, not here: two app replicas both running `prisma db
+# push` against the same database on startup would race each other. No
+# versioned Prisma migrations exist yet -- `db push` applies the current
+# schema directly; a production setup would replace this with
+# `prisma migrate deploy` against committed migration files.
+CMD ["node", "dist/main.js"]

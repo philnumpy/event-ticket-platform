@@ -27,6 +27,9 @@ import {
 } from '../src/persistence/tokens';
 import { PAYMENT_COMMAND_PUBLISHER, PAYMENT_RESPONSE_CONSUMER } from '../src/saga/tokens';
 import { OUTBOX_REPOSITORY } from '../src/messaging/tokens';
+import { RATE_LIMITER } from '../src/common/rate-limit/tokens';
+import { RateLimiter } from '../src/common/rate-limit/RateLimiter';
+import { InMemoryTokenBucketRateLimiter } from '../src/common/rate-limit/InMemoryTokenBucketRateLimiter';
 import { FakeRedis } from './fakes/FakeRedis';
 import { NoopEventPublisher, NoopPaymentCommandPublisher, NoopResponseConsumer } from './fakes/NoopKafkaFakes';
 
@@ -46,6 +49,14 @@ export interface TestApp {
   paymentResponses: NoopResponseConsumer;
 }
 
+export interface BuildTestAppOptions {
+  /** Defaults to an effectively-unlimited in-memory bucket so ordinary
+   * e2e tests firing a handful of requests never trip it. A test that
+   * specifically wants to exercise 429 behavior supplies its own
+   * low-capacity limiter instead. */
+  rateLimiter?: RateLimiter;
+}
+
 /**
  * Builds the real AppModule with every infrastructure token swapped for a
  * Phase-1 in-memory adapter, FakeRedis, or a no-op Kafka stand-in — the
@@ -55,7 +66,7 @@ export interface TestApp {
  * publish-a-command / react-to-a-response logic are all verified without a
  * real Postgres, Redis, or Kafka broker.
  */
-export async function buildTestApp(): Promise<TestApp> {
+export async function buildTestApp(options: BuildTestAppOptions = {}): Promise<TestApp> {
   const venues = new InMemoryVenueRepository();
   const seats = new InMemorySeatRepository();
   const events = new InMemoryEventCatalogRepository();
@@ -68,6 +79,9 @@ export async function buildTestApp(): Promise<TestApp> {
   const outbox = new NoopEventPublisher();
   const paymentCommands = new NoopPaymentCommandPublisher();
   const paymentResponses = new NoopResponseConsumer();
+  const rateLimiter =
+    options.rateLimiter ??
+    new InMemoryTokenBucketRateLimiter({ capacity: 10_000, refillTokensPerSecond: 10_000 });
 
   const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
     .overrideProvider(PRISMA_CLIENT)
@@ -98,6 +112,8 @@ export async function buildTestApp(): Promise<TestApp> {
     .useValue(paymentCommands)
     .overrideProvider(PAYMENT_RESPONSE_CONSUMER)
     .useValue(paymentResponses)
+    .overrideProvider(RATE_LIMITER)
+    .useValue(rateLimiter)
     .compile();
 
   const app = moduleRef.createNestApplication();
