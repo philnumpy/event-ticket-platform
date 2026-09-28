@@ -6,6 +6,8 @@ export * from './outbox/OutboxEventPublisher';
 export * from './outbox/EventPublisherPort';
 export * from './outbox/OutboxRelay';
 
+export * from './contracts/paymentMessages';
+
 export * from './kafka/client';
 export * from './kafka/KafkaEventPublisher';
 export * from './kafka/KafkaConsumerRunner';

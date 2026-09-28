@@ -1,10 +1,9 @@
 import { Module } from '@nestjs/common';
-import { createKafkaClient, KafkaConsumerRunner } from '@etp/messaging';
+import { createKafkaClient, KafkaConsumerRunner, PAYMENT_GATEWAY_RESPONDED_TOPIC } from '@etp/messaging';
 import { DomainModule } from '../persistence/domain.module';
 import { BookingSagaService } from './booking-saga.service';
 import { KafkaPaymentCommandPublisher } from './PaymentCommandPublisher';
 import { PAYMENT_COMMAND_PUBLISHER, PAYMENT_RESPONSE_CONSUMER } from './tokens';
-import { PAYMENT_GATEWAY_RESPONDED_TOPIC } from './booking-saga.messages';
 
 @Module({
   imports: [DomainModule],

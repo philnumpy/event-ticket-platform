@@ -1,12 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import { Inject, Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { BookingApplicationService, BookingRepository, DomainEventPublisher, SEATS_HELD, SeatsHeldPayload } from '@etp/domain';
-import { ConsumedMessage } from '@etp/messaging';
+import { ConsumedMessage, PaymentGatewayRespondedMessage, PaymentRequestedMessage } from '@etp/messaging';
 import { BOOKING_REPOSITORY, DOMAIN_EVENT_PUBLISHER } from '../persistence/tokens';
 import { PAYMENT_COMMAND_PUBLISHER, PAYMENT_RESPONSE_CONSUMER } from './tokens';
 import { PaymentCommandPublisher } from './PaymentCommandPublisher';
 import { ResponseConsumer } from './ResponseConsumer';
-import { PaymentGatewayRespondedMessage, PaymentRequestedMessage } from './booking-saga.messages';
 
 /**
  * The saga orchestrator ADR 0001 named but hadn't been built yet: reacts to

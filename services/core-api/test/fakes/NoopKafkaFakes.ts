@@ -1,7 +1,6 @@
-import { EventPublisherPort, MessageHandler, OutboxRecord } from '@etp/messaging';
+import { EventPublisherPort, MessageHandler, OutboxRecord, PaymentRequestedMessage } from '@etp/messaging';
 import { PaymentCommandPublisher } from '../../src/saga/PaymentCommandPublisher';
 import { ResponseConsumer } from '../../src/saga/ResponseConsumer';
-import { PaymentRequestedMessage } from '../../src/saga/booking-saga.messages';
 
 /** No-op stand-ins for the three places this app talks to a real Kafka
  * broker, so tests exercise all the DI wiring and business logic around

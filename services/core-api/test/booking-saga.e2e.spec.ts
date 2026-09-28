@@ -1,7 +1,7 @@
 import request from 'supertest';
 import { buildTestApp, TestApp } from './testApp';
 import { seedShow } from './fixtures';
-import { PaymentGatewayRespondedMessage } from '../src/saga/booking-saga.messages';
+import { PaymentGatewayRespondedMessage } from '@etp/messaging';
 
 describe('BookingSagaService', () => {
   let testApp: TestApp;

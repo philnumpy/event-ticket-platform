@@ -1,13 +1,11 @@
 import type { Producer } from 'kafkajs';
-import { PaymentRequestedMessage } from './booking-saga.messages';
+import { PAYMENT_REQUESTED_TOPIC, PaymentRequestedMessage } from '@etp/messaging';
 
 export interface PaymentCommandPublisher {
   publishPaymentRequested(message: PaymentRequestedMessage): Promise<void>;
   connect(): Promise<void>;
   disconnect(): Promise<void>;
 }
-
-export const PAYMENT_REQUESTED_TOPIC = 'etp.payment.requested';
 
 /** Thin wrapper so BookingSagaService depends on an interface it can be
  * tested against, not a raw kafkajs Producer it would otherwise have to
