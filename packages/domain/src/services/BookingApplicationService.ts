@@ -29,6 +29,7 @@ import {
   BOOKING_EXPIRED,
   PAYMENT_FAILED,
   REFUND_PROCESSED,
+  SEATS_HELD,
 } from '../events/BookingEvents';
 
 export interface InitiateBookingCommand {
@@ -164,6 +165,14 @@ export class BookingApplicationService {
 
     booking.attachHold(hold.id);
     await Promise.all([this.holds.save(hold), this.bookings.save(booking)]);
+    await this.eventPublisher.publish(
+      createEvent(SEATS_HELD, {
+        bookingId: booking.id,
+        userId: booking.userId,
+        showId: booking.showId,
+        seatIds: booking.seatIds,
+      }),
+    );
 
     return { booking, hold };
   }
@@ -254,6 +263,7 @@ export class BookingApplicationService {
           createEvent(PAYMENT_FAILED, {
             bookingId: booking.id,
             userId: booking.userId,
+            showId: booking.showId,
             paymentId: payment.id,
             status: 'FAILED' as const,
           }),
@@ -283,6 +293,7 @@ export class BookingApplicationService {
         createEvent(PAYMENT_FAILED, {
           bookingId: booking.id,
           userId: booking.userId,
+          showId: booking.showId,
           paymentId: payment.id,
           status: outcome,
         }),
@@ -342,6 +353,7 @@ export class BookingApplicationService {
         createEvent(BOOKING_CANCELLED, {
           bookingId,
           userId: booking.userId,
+          showId: booking.showId,
           reason: 'USER_CANCELLED_BEFORE_PAYMENT',
         }),
       );
@@ -365,6 +377,7 @@ export class BookingApplicationService {
         createEvent(BOOKING_CANCELLED, {
           bookingId,
           userId: booking.userId,
+          showId: booking.showId,
           reason: `REFUND_POLICY_${policy.name}`,
         }),
       );
@@ -407,6 +420,7 @@ export class BookingApplicationService {
         createEvent(BOOKING_EXPIRED, {
           bookingId: booking.id,
           userId: booking.userId,
+          showId: hold.showId,
           holdId: hold.id,
         }),
       );

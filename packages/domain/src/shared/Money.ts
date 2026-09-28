@@ -63,6 +63,10 @@ export class Money {
     return `${(this.minorUnits / 100).toFixed(2)} ${this.currency}`;
   }
 
+  toJSON() {
+    return { amount: this.minorUnits, currency: this.currency };
+  }
+
   private assertSameCurrency(other: Money): void {
     if (this.currency !== other.currency) {
       throw new Error(`Currency mismatch: ${this.currency} vs ${other.currency}`);

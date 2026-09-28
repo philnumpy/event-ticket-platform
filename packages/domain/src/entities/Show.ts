@@ -55,4 +55,16 @@ export class Show {
   hoursUntilStart(from: Date = new Date()): number {
     return (this.startTime.getTime() - from.getTime()) / (1000 * 60 * 60);
   }
+
+  toJSON() {
+    return {
+      id: this.id,
+      eventId: this.eventId,
+      venueId: this.venueId,
+      startTime: this.startTime,
+      endTime: this.endTime,
+      status: this._status,
+      basePriceByTier: this.basePriceByTier,
+    };
+  }
 }

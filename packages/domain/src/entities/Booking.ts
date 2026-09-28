@@ -105,4 +105,23 @@ export class Booking {
   isTerminal(): boolean {
     return BookingStateMachine.isTerminal(this._state, { paymentCaptured: this._paymentCaptured });
   }
+
+  /** Without this, JSON.stringify would serialize the underscore-prefixed
+   * backing fields directly (TS `private` is compile-time only) instead of
+   * going through the getters — leaking internal naming through any HTTP
+   * response that returns a Booking. */
+  toJSON() {
+    return {
+      id: this.id,
+      userId: this.userId,
+      showId: this.showId,
+      seatIds: this.seatIds,
+      amount: this.amount,
+      createdAt: this.createdAt,
+      updatedAt: this._updatedAt,
+      state: this._state,
+      paymentCaptured: this._paymentCaptured,
+      holdId: this._holdId,
+    };
+  }
 }

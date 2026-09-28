@@ -80,4 +80,13 @@ export class ShowSeat {
       holdId: this._holdId,
     });
   }
+
+  toJSON() {
+    return {
+      showId: this.showId,
+      seatId: this.seatId,
+      status: this._status,
+      holdId: this._holdId,
+    };
+  }
 }

@@ -61,4 +61,16 @@ export class Hold {
       this._status = 'RELEASED';
     }
   }
+
+  toJSON() {
+    return {
+      id: this.id,
+      showId: this.showId,
+      seatIds: this.seatIds,
+      userId: this.userId,
+      createdAt: this.createdAt,
+      expiresAt: this.expiresAt,
+      status: this._status,
+    };
+  }
 }

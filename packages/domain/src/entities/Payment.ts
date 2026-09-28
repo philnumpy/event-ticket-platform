@@ -46,4 +46,16 @@ export class Payment {
   markTimeout(): void {
     this._status = 'TIMEOUT';
   }
+
+  toJSON() {
+    return {
+      id: this.id,
+      bookingId: this.bookingId,
+      amount: this.amount,
+      idempotencyKey: this.idempotencyKey,
+      provider: this.provider,
+      createdAt: this.createdAt,
+      status: this._status,
+    };
+  }
 }

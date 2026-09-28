@@ -1,0 +1,81 @@
+import { BOOKING_CANCELLED, CatalogQueryService, createEvent, DomainEventPublisher } from '@etp/domain';
+import { CatalogCacheService } from '../src/catalog/catalog-cache.service';
+import { FakeRedis } from './fakes/FakeRedis';
+
+function buildCatalogStub(seatMap: jest.Mock, browse: jest.Mock = jest.fn()): CatalogQueryService {
+  return { seatMap, browse } as unknown as CatalogQueryService;
+}
+
+describe('CatalogCacheService', () => {
+  it('serves a cached value on the second call without recomputing', async () => {
+    const seatMapSpy = jest.fn().mockResolvedValue([{ seatId: 'seat-1', status: 'AVAILABLE' }]);
+    const cache = new CatalogCacheService(buildCatalogStub(seatMapSpy), new FakeRedis() as never, new DomainEventPublisher());
+
+    await cache.seatMap('show-1');
+    await cache.seatMap('show-1');
+
+    expect(seatMapSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('protects against a cache stampede: N concurrent misses compute exactly once', async () => {
+    let inFlight = 0;
+    let maxConcurrent = 0;
+    const seatMapSpy = jest.fn().mockImplementation(async () => {
+      inFlight++;
+      maxConcurrent = Math.max(maxConcurrent, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      inFlight--;
+      return [{ seatId: 'seat-1', status: 'AVAILABLE' }];
+    });
+    const cache = new CatalogCacheService(buildCatalogStub(seatMapSpy), new FakeRedis() as never, new DomainEventPublisher());
+
+    await Promise.all(Array.from({ length: 20 }, () => cache.seatMap('show-1')));
+
+    expect(seatMapSpy).toHaveBeenCalledTimes(1);
+    expect(maxConcurrent).toBe(1);
+  });
+
+  it('invalidates the seat-map cache when a subscribed domain event fires', async () => {
+    const seatMapSpy = jest.fn().mockResolvedValue([]);
+    const publisher = new DomainEventPublisher();
+    const cache = new CatalogCacheService(buildCatalogStub(seatMapSpy), new FakeRedis() as never, publisher);
+    cache.onModuleInit();
+
+    await cache.seatMap('show-1');
+    expect(seatMapSpy).toHaveBeenCalledTimes(1);
+
+    await publisher.publish(
+      createEvent(BOOKING_CANCELLED, { bookingId: 'b1', userId: 'u1', showId: 'show-1', reason: 'x' }),
+    );
+
+    await cache.seatMap('show-1');
+    expect(seatMapSpy).toHaveBeenCalledTimes(2); // recomputed after invalidation
+  });
+
+  it('does not invalidate a different show\'s cache entry', async () => {
+    const seatMapSpy = jest.fn().mockResolvedValue([]);
+    const publisher = new DomainEventPublisher();
+    const cache = new CatalogCacheService(buildCatalogStub(seatMapSpy), new FakeRedis() as never, publisher);
+    cache.onModuleInit();
+
+    await cache.seatMap('show-1');
+    await publisher.publish(
+      createEvent(BOOKING_CANCELLED, { bookingId: 'b1', userId: 'u1', showId: 'show-2', reason: 'x' }),
+    );
+    await cache.seatMap('show-1');
+
+    expect(seatMapSpy).toHaveBeenCalledTimes(1); // show-1's entry untouched
+  });
+
+  it('gives up waiting on a stuck lock holder and computes the value itself', async () => {
+    const redis = new FakeRedis();
+    await redis.set('lock:catalog:seatmap:show-1', '1', 'PX', 100_000, 'NX'); // simulates a crashed holder
+    const seatMapSpy = jest.fn().mockResolvedValue(['fallback']);
+    const cache = new CatalogCacheService(buildCatalogStub(seatMapSpy), redis as never, new DomainEventPublisher());
+
+    const result = await cache.seatMap('show-1');
+
+    expect(result).toEqual(['fallback']);
+    expect(seatMapSpy).toHaveBeenCalledTimes(1);
+  }, 10_000);
+});
