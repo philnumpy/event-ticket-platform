@@ -36,6 +36,22 @@ describe('Booking HTTP', () => {
     expect(seatMapAfterPay.body[0].status).toBe('BOOKED');
   });
 
+  it('GET /bookings/:id returns the booking, and 404s for an unknown id', async () => {
+    await seedShow(testApp, { showId: 'show-b5', seatIds: ['seat-1'] });
+    const initiate = await request(testApp.app.getHttpServer())
+      .post('/bookings')
+      .send({ userId: 'user-1', showId: 'show-b5', seatIds: ['seat-1'] });
+    const bookingId = initiate.body.booking.id as string;
+
+    const found = await request(testApp.app.getHttpServer()).get(`/bookings/${bookingId}`);
+    expect(found.status).toBe(200);
+    expect(found.body.id).toBe(bookingId);
+    expect(found.body.state).toBe('HELD');
+
+    const missing = await request(testApp.app.getHttpServer()).get('/bookings/nonexistent');
+    expect(missing.status).toBe(404);
+  });
+
   it('maps NotFoundError to a 404 through the global exception filter', async () => {
     const res = await request(testApp.app.getHttpServer())
       .post('/bookings')

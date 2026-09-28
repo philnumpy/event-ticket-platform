@@ -1,4 +1,4 @@
-import { Body, Controller, HttpCode, HttpStatus, Param, Post } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, HttpStatus, Param, Post } from '@nestjs/common';
 import { BookingApplicationService } from '@etp/domain';
 import { InitiateBookingDto } from './dto/initiate-booking.dto';
 import { ConfirmPaymentDto } from './dto/confirm-payment.dto';
@@ -18,6 +18,11 @@ export class BookingController {
   @Post()
   async initiate(@Body() dto: InitiateBookingDto) {
     return this.bookingService.initiateBooking(dto);
+  }
+
+  @Get(':id')
+  async getBooking(@Param('id') id: string) {
+    return this.bookingService.getBooking(id);
   }
 
   @Post(':id/payment')

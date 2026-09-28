@@ -459,7 +459,128 @@ initiate → pay → confirm flow end to end.
 
 ---
 
-*Phase 3 adds: cache-aside for the browse/seat-map reads, the transactional
-outbox + Kafka publisher replacing Phase 1's in-process
-`DomainEventPublisher`, the payment-service and notification-service
-satellite processes, and the booking saga orchestrator.*
+## Phase 3: the running system — core-api, caching, outbox, saga, satellites
+
+Phases 1 and 2 built libraries with no runnable app on top of them. Phase 3
+builds the actual system: `services/core-api` (the modular monolith ADR
+0001 named), `services/payment-service`, and `services/notification-service`,
+plus `packages/messaging` (the outbox + Kafka layer connecting them).
+
+### Service topology
+
+```mermaid
+flowchart LR
+    Client -->|HTTP| CoreAPI[core-api]
+    CoreAPI -->|SEATS_HELD subscriber| Saga[BookingSagaService]
+    Saga -->|payment.requested| Kafka[(Kafka)]
+    Kafka -->|payment.requested| PaymentService[payment-service<br/>mock gateway]
+    PaymentService -->|payment.gateway.responded| Kafka
+    Kafka -->|payment.gateway.responded| Saga
+    Saga -->|confirmPayment| CoreAPI
+
+    CoreAPI -->|domain events, via OutboxEventPublisher| Outbox[(outbox_events table)]
+    Outbox -->|OutboxRelay poll| Kafka
+    Kafka -->|booking.confirmed, etc.| NotificationService[notification-service]
+
+    CoreAPI --> Postgres[(Postgres)]
+    CoreAPI --> Redis[(Redis)]
+```
+
+Every arrow into or out of Kafka crosses a process boundary; every other
+arrow is a function call within `core-api`. This is deliberate — see ADR
+0001 for why catalog/inventory/booking/admin share one process while
+payment and notification don't.
+
+### `core-api`'s module graph
+
+```mermaid
+classDiagram
+    class PersistenceModule { Prisma/Redis clients + repository tokens, Global }
+    class DomainModule { BookingApplicationService, CatalogQueryService, HoldExpirySweep }
+    class MessagingModule { OutboxEventPublisher, OutboxRelay }
+    class BookingSagaModule { BookingSagaService }
+    class CatalogModule { CatalogCacheService, CatalogController }
+    class BookingModule { BookingController }
+    class AdminModule { AdminService, AdminController }
+
+    DomainModule --> PersistenceModule : injects repository tokens
+    MessagingModule --> DomainModule : injects DOMAIN_EVENT_PUBLISHER
+    BookingSagaModule --> DomainModule
+    CatalogModule --> DomainModule
+    BookingModule --> DomainModule
+```
+
+Nothing outside `PersistenceModule` imports `@etp/persistence` or
+`@prisma/client` directly — every other module depends on `@etp/domain`
+port tokens (`SHOW_REPOSITORY`, `SEAT_HOLD_SERVICE`, ...), which is what
+let `test/testApp.ts` swap every one of them for a Phase 1 in-memory
+adapter and get a fully working, Docker-free test app.
+
+### Caching: cache-aside with stampede protection and event-driven invalidation
+
+`CatalogCacheService` wraps `CatalogQueryService`'s two read paths
+(`browse`, `seatMap`) with:
+
+- **Cache-aside**: check Redis, compute-and-populate on miss.
+- **Stampede protection**: a Redis `SET NX PX` lock around the "compute"
+  step — only the first caller to miss actually queries the database;
+  every concurrent caller for the same key waits on the lock instead
+  (bounded: falls back to computing itself if the lock holder doesn't
+  finish in time, rather than waiting forever on a crashed holder).
+- **Invalidation via the Observer pattern, not a direct call**:
+  `CatalogCacheService.onModuleInit` subscribes to
+  `BOOKING_CONFIRMED`/`BOOKING_CANCELLED`/`BOOKING_EXPIRED`/`PAYMENT_FAILED`
+  on the *same* `DomainEventPublisher` `BookingApplicationService` already
+  publishes to. `BookingController` has no idea the cache exists.
+
+Proven without Redis or Kafka in
+`services/core-api/test/catalog-cache.service.spec.ts` using a hand-rolled
+`FakeRedis` — whose own NX-lock bug (fixed during Phase 3) is itself a
+small case study in the project's central theme; see the Phase 3a commit
+message.
+
+### Async delivery: outbox + Kafka, and the saga
+
+Covered in depth in [ADR 0004](adr/0004-outbox-and-async-delivery.md):
+`OutboxEventPublisher` (Observer) durably records every domain event,
+`OutboxRelay` polls and forwards to Kafka with retry-then-dead-letter,
+and `BookingSagaService` is the thin orchestrator reacting to `SEATS_HELD`
+and to the mock gateway's response — reusing `confirmPayment`'s Phase 2
+idempotency-claim logic verbatim for the platform's required
+duplicate-callback behavior, and relying on `HoldExpirySweep` (not new
+saga-specific code) as the compensating action when payment-service never
+responds at all.
+
+### Satellite services
+
+`payment-service` and `notification-service` are deliberately plain
+Node/TypeScript, not NestJS — a single-purpose Kafka consumer doesn't need
+a DI framework, and giving it one would be the "over-engineer" side of the
+`don't over-engineer` instruction. Both separate their pure decision logic
+(`mockGateway.ts`'s `decideOutcome`; `notificationBuilder.ts`'s
+`buildNotification`) from the Kafka wiring in `main.ts`, so the interesting
+part is unit-tested without a broker in either service.
+
+### Proof
+
+- `packages/messaging/test/KafkaConsumerRunner.spec.ts` — retry-then-DLQ,
+  using hand-rolled fake Kafka consumer/producer objects.
+- `packages/messaging/test/OutboxRelay.spec.ts` /
+  `OutboxEventPublisher.spec.ts` — the outbox write-then-relay pipeline.
+- `packages/persistence/test/HoldExpirySweep.spec.ts` — the saga's
+  timeout-based compensation, in isolation.
+- `services/core-api/test/booking-saga.e2e.spec.ts` — the full
+  initiate → `SEATS_HELD` → `payment.requested` → simulated gateway
+  response → `confirmPayment` loop, including the duplicate-callback case.
+- `services/payment-service/test`, `services/notification-service/test` —
+  each service's pure decision logic.
+- [`docs/chaos-test.md`](chaos-test.md) — payment-service killed for a
+  booking's entire lifetime, proving the hold TTL is the correct
+  compensating mechanism end to end. Written and reviewed; not yet run
+  against real infrastructure (see that doc's Status section).
+
+---
+
+*Phase 4 adds: Nginx in front of multiple core-api replicas, rate limiting,
+idempotency-key middleware, circuit breakers on the payment call path, and
+structured logging with correlation IDs.*

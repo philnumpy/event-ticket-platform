@@ -70,6 +70,14 @@ export class BookingApplicationService {
     private readonly clock: () => Date = () => new Date(),
   ) {}
 
+  async getBooking(bookingId: string): Promise<Booking> {
+    const booking = await this.bookings.findById(bookingId);
+    if (!booking) {
+      throw new NotFoundError('Booking', bookingId);
+    }
+    return booking;
+  }
+
   async initiateBooking(cmd: InitiateBookingCommand): Promise<InitiateBookingResult> {
     const show = await this.shows.findById(cmd.showId);
     if (!show) {

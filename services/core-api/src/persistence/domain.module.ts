@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Inject, Module, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import type Redis from 'ioredis';
 import {
   BookingApplicationService,
@@ -16,11 +16,12 @@ import {
   ShowSeatRepository,
   VenueRepository,
 } from '@etp/domain';
-import { RedisSeatHoldService } from '@etp/persistence';
+import { HoldExpirySweep, RedisSeatHoldService } from '@etp/persistence';
 import {
   BOOKING_REPOSITORY,
   DOMAIN_EVENT_PUBLISHER,
   EVENT_CATALOG_REPOSITORY,
+  HOLD_EXPIRY_SWEEP,
   HOLD_REPOSITORY,
   PAYMENT_REPOSITORY,
   PRICING_STRATEGY,
@@ -34,6 +35,7 @@ import {
 } from './tokens';
 
 const HOLD_TTL_SECONDS = Number(process.env.HOLD_TTL_SECONDS ?? 300);
+const HOLD_SWEEP_INTERVAL_MS = Number(process.env.HOLD_SWEEP_INTERVAL_MS ?? 30_000);
 
 /**
  * Builds the two @etp/domain application services from the repository
@@ -121,7 +123,27 @@ const HOLD_TTL_SECONDS = Number(process.env.HOLD_TTL_SECONDS ?? 300);
       ) => new CatalogQueryService(shows, events, venues, showSeats),
       inject: [SHOW_REPOSITORY, EVENT_CATALOG_REPOSITORY, VENUE_REPOSITORY, SHOW_SEAT_REPOSITORY],
     },
+    {
+      provide: HOLD_EXPIRY_SWEEP,
+      useFactory: (holds: HoldRepository, bookingService: BookingApplicationService) =>
+        new HoldExpirySweep(holds, bookingService, HOLD_SWEEP_INTERVAL_MS),
+      inject: [HOLD_REPOSITORY, BookingApplicationService],
+    },
   ],
   exports: [BookingApplicationService, CatalogQueryService, DOMAIN_EVENT_PUBLISHER],
 })
-export class DomainModule {}
+export class DomainModule implements OnModuleInit, OnModuleDestroy {
+  constructor(@Inject(HOLD_EXPIRY_SWEEP) private readonly holdExpirySweep: HoldExpirySweep) {}
+
+  onModuleInit(): void {
+    // The compensating action the booking saga leans on for "payment
+    // service never responds at all" (ADR 0004) — without this actually
+    // running, a booking whose payment.requested is never answered would
+    // stay HELD forever instead of the seat freeing up on the hold's TTL.
+    this.holdExpirySweep.start();
+  }
+
+  onModuleDestroy(): void {
+    this.holdExpirySweep.stop();
+  }
+}

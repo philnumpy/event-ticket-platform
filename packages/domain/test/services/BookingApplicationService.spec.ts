@@ -317,6 +317,23 @@ describe('BookingApplicationService', () => {
     expect(finalBooking?.state).toBe(BookingState.REFUNDED); // "refunded" $0, still processed
   });
 
+  it('getBooking returns the booking by id', async () => {
+    const world = buildWorld({ showStartOffsetHours: 72 });
+    const { booking } = await world.service.initiateBooking({
+      userId: USER,
+      showId: SHOW_ID,
+      seatIds: [SEAT_1],
+    });
+
+    const fetched = await world.service.getBooking(booking.id);
+    expect(fetched.id).toBe(booking.id);
+  });
+
+  it('getBooking throws NotFoundError for an unknown id', async () => {
+    const world = buildWorld({ showStartOffsetHours: 72 });
+    await expect(world.service.getBooking('nonexistent')).rejects.toThrow(NotFoundError);
+  });
+
   it('prices a multi-seat booking as the sum of each seat', async () => {
     const world = buildWorld({ showStartOffsetHours: 72 });
     const { booking } = await world.service.initiateBooking({
