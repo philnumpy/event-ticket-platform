@@ -326,4 +326,33 @@ describe('BookingApplicationService', () => {
     });
     expect(booking.amount.amount).toBe(100000);
   });
+
+  it('processes exactly once when 20 concurrent duplicate payment callbacks share one idempotency key', async () => {
+    // Mirrors the seat-hold concurrency proof, but for the idempotency-key
+    // claim path: this is the "payment gateway sends duplicate callbacks"
+    // requirement, and it must not double-process or double-confirm.
+    const world = buildWorld({ showStartOffsetHours: 72 });
+    const { booking } = await world.service.initiateBooking({
+      userId: USER,
+      showId: SHOW_ID,
+      seatIds: [SEAT_1],
+    });
+
+    const CALLBACKS = 20;
+    const results = await Promise.all(
+      Array.from({ length: CALLBACKS }, () =>
+        world.service.confirmPayment(booking.id, 'SUCCESS', 'shared-idem-key'),
+      ),
+    );
+
+    const uniquePaymentIds = new Set(results.map((p) => p.id));
+    expect(uniquePaymentIds.size).toBe(1);
+    expect(results.every((p) => p.status === 'SUCCESS')).toBe(true);
+
+    const finalBooking = await world.bookings.findById(booking.id);
+    expect(finalBooking?.state).toBe(BookingState.CONFIRMED); // not corrupted by the race
+
+    const seat = await world.showSeats.findById(SHOW_ID, SEAT_1);
+    expect(seat?.status).toBe('BOOKED');
+  });
 });

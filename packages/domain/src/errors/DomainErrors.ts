@@ -43,9 +43,3 @@ export class FraudSuspectedError extends ValidationFailedError {
     super(`Booking rejected by fraud check: ${reason}`);
   }
 }
-
-export class DuplicatePaymentError extends DomainError {
-  constructor(idempotencyKey: string) {
-    super(`Payment with idempotency key "${idempotencyKey}" was already processed`);
-  }
-}

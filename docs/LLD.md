@@ -1,10 +1,16 @@
 # Low-Level Design
 
-This document grows phase by phase. This revision covers **Phase 1**: the
-domain model in [`packages/domain`](../packages/domain), built and tested
-with zero framework or database dependency so the business rules can be
-verified in isolation before anything about persistence, transport, or
-infrastructure is decided.
+This document grows phase by phase.
+
+- **Phase 1** (below): the domain model in
+  [`packages/domain`](../packages/domain), built and tested with zero
+  framework or database dependency.
+- **Phase 2**: [`packages/persistence`](../packages/persistence) — Prisma
+  and Redis-backed implementations of Phase 1's repository ports, plus the
+  seat-hold and payment-idempotency concurrency fixes. See
+  [ADR 0002](adr/0002-seat-hold-concurrency-control.md) and
+  [ADR 0003](adr/0003-payment-idempotency.md) for the design rationale;
+  this section covers the resulting package structure and mapping layer.
 
 ## Package layout
 
@@ -366,6 +372,94 @@ lives in `docs/adr/`.
 
 ---
 
-*Phase 2 adds: Prisma-backed repositories, the Redis/DB seat-hold ADR and
-implementation, and Testcontainers integration tests replacing the
-in-memory adapters at the wiring level only.*
+## Phase 2: persistence and the real concurrency fix
+
+### Package layout
+
+```
+packages/persistence/
+  prisma/schema.prisma   Postgres schema: enums mirror the domain's literal
+                          unions; Hold/Booking store seatIds as a native
+                          Postgres text[] rather than a join table
+  src/
+    prisma/client.ts      PrismaClient factory
+    redis/client.ts        ioredis factory
+    mappers/money.ts        Money <-> {amountMinorUnits, currency} / JSON
+    repositories/          Prisma* implementations of every @etp/domain port
+    redis/RedisSeatHoldService.ts   the real SeatHoldService (ADR 0002)
+    jobs/HoldExpirySweep.ts        periodic reconciliation for timed-out holds
+  test/
+    Persistence.integration.spec.ts  Testcontainers: real Postgres + Redis
+```
+
+Every class in `repositories/` implements a `@etp/domain` port and nothing
+else — `BookingApplicationService`, `CatalogQueryService`, and every domain
+entity are completely unaware this package exists. Swapping Phase 1's
+in-memory adapters for these was a wiring-only change at the composition
+root; zero lines changed in `packages/domain/src/services`.
+
+```mermaid
+classDiagram
+    class ShowSeatRepository { <<interface>> }
+    class PaymentRepository { <<interface>> }
+    class SeatHoldService { <<interface>> }
+
+    ShowSeatRepository <|.. InMemoryShowSeatRepository
+    ShowSeatRepository <|.. PrismaShowSeatRepository
+    PaymentRepository <|.. InMemoryPaymentRepository
+    PaymentRepository <|.. PrismaPaymentRepository
+    SeatHoldService <|.. NaiveInMemorySeatHoldService
+    SeatHoldService <|.. GuardedInMemorySeatHoldService
+    SeatHoldService <|.. RedisSeatHoldService
+
+    RedisSeatHoldService --> ShowSeatRepository : tryTransition()
+    RedisSeatHoldService --> Redis : SET NX PX
+```
+
+### The mapping layer
+
+Domain entities construct freely from plain property bags (every optional
+reconstruction field — `status`, `holdId`, `updatedAt` — was designed in
+Phase 1 exactly so a repository adapter could rebuild an entity from a row
+without a second "hydrate" code path). Each `Prisma*Repository` is a thin
+translation: read a Prisma row, call one domain constructor; take a domain
+entity, spread its fields into a Prisma `upsert`. The one non-trivial
+mapping is `Show.basePriceByTier` (a `Record<SeatTier, Money>`) against a
+single Postgres `Json` column (`mappers/money.ts`) — deliberately not a
+separate price-per-tier table, since the tier list is small, fixed, and
+read far more often than written.
+
+### `tryTransition`: the correctness-critical addition to Phase 1's port
+
+Phase 1's `BookingApplicationService` mutated `ShowSeat` via
+read-then-save — safe for a single in-memory `Map` (no `await` between
+steps), unsafe against a real database shared across processes. Phase 2
+adds `ShowSeatRepository.tryTransition()` — one atomic conditional
+`UPDATE` — and **Phase 1's entity is retrofitted to use it for every
+lifecycle mutation, not just seat acquisition**, closing a race between the
+hold-expiry sweep and a payment confirmation landing at the same instant.
+Full comparison of DB row-locking vs. optimistic locking vs. Redis
+distributed locking, and why the shipped design is a hybrid of the last
+two, is in
+[ADR 0002](adr/0002-seat-hold-concurrency-control.md).
+
+The identical shape of bug existed in payment idempotency (`claim()` vs.
+the Phase 1 `findByIdempotencyKey`-then-save pair) — see
+[ADR 0003](adr/0003-payment-idempotency.md).
+
+### Proof
+
+`packages/persistence/test/Persistence.integration.spec.ts` uses
+Testcontainers to start real Postgres and Redis containers, applies the
+Prisma schema with `prisma db push`, and re-runs the Phase 1 concurrency
+proof — 500 concurrent callers racing one seat — against the real stack via
+`RedisSeatHoldService` and `PrismaShowSeatRepository`, asserting exactly one
+winner. The same suite proves the payment-claim race and a full
+initiate → pay → confirm flow end to end.
+
+---
+
+*Phase 3 adds: cache-aside for the browse/seat-map reads, the transactional
+outbox + Kafka publisher replacing Phase 1's in-process
+`DomainEventPublisher`, the payment-service and notification-service
+satellite processes, and the booking saga orchestrator.*

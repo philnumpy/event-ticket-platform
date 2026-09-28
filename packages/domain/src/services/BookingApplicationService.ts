@@ -3,11 +3,13 @@ import { Booking } from '../entities/Booking';
 import { Hold } from '../entities/Hold';
 import { Payment } from '../entities/Payment';
 import { Money } from '../shared/Money';
+import { sleep } from '../shared/sleep';
 import { BookingState, BookingTrigger } from '../booking/BookingState';
 import {
   HoldExpiredError,
   InvalidBookingStateTransitionError,
   NotFoundError,
+  SeatNotAvailableError,
 } from '../errors/DomainErrors';
 import { ShowRepository } from '../repositories/ShowRepository';
 import { SeatRepository } from '../repositories/SeatRepository';
@@ -143,13 +145,17 @@ export class BookingApplicationService {
       }
     } catch (err) {
       // Compensate: release whatever we did manage to hold before hitting a
-      // seat someone else won the race for.
+      // seat someone else won the race for. Best-effort: a `false` result
+      // just means the seat already moved on by some other path, which is
+      // fine — release is idempotent by design.
       for (const seatId of heldSeatIds) {
-        const showSeat = await this.showSeats.findById(cmd.showId, seatId);
-        if (showSeat) {
-          showSeat.release(hold.id);
-          await this.showSeats.save(showSeat);
-        }
+        await this.showSeats.tryTransition({
+          showId: cmd.showId,
+          seatId,
+          from: 'HELD',
+          to: 'AVAILABLE',
+          holdId: hold.id,
+        });
       }
       booking.rejectBeforeHold();
       await this.bookings.save(booking);
@@ -168,17 +174,31 @@ export class BookingApplicationService {
     idempotencyKey: string,
     provider = 'MOCK_GATEWAY',
   ): Promise<Payment> {
-    // Idempotency: a retried or duplicate callback with the same key replays
-    // the original result instead of processing the payment twice.
-    const existing = await this.payments.findByIdempotencyKey(idempotencyKey);
-    if (existing) {
-      return existing;
-    }
-
     const booking = await this.bookings.findById(bookingId);
     if (!booking) {
       throw new NotFoundError('Booking', bookingId);
     }
+
+    // Idempotency: claim() is the atomic check-and-insert. A plain
+    // "findByIdempotencyKey, then save if absent" has the exact same race
+    // as naive seat-holding -- two concurrent duplicate callbacks (which
+    // the platform must tolerate; see the mock payment gateway) could both
+    // see "not found" and both fall through to processing. claim() makes
+    // exactly one caller the processor; every other caller (this one, if
+    // it lost) waits for that processor's result instead of reprocessing.
+    const attempt = new Payment({
+      id: this.idGenerator(),
+      bookingId,
+      amount: booking.amount,
+      idempotencyKey,
+      provider,
+      createdAt: this.clock(),
+    });
+    const claimResult = await this.payments.claim(attempt);
+    if (!claimResult.created) {
+      return this.awaitSettledPayment(claimResult.payment);
+    }
+    const payment = claimResult.payment;
 
     const hold = booking.holdId ? await this.holds.findById(booking.holdId) : null;
     if (!hold) {
@@ -187,17 +207,10 @@ export class BookingApplicationService {
 
     if (hold.status === 'ACTIVE' && hold.isExpired(this.clock())) {
       await this.expireHold(hold);
+      payment.markFailed();
+      await this.payments.save(payment);
       throw new HoldExpiredError(hold.id);
     }
-
-    const payment = new Payment({
-      id: this.idGenerator(),
-      bookingId,
-      amount: booking.amount,
-      idempotencyKey,
-      provider,
-      createdAt: this.clock(),
-    });
 
     if (outcome === 'SUCCESS') {
       payment.markSuccess();
@@ -205,12 +218,20 @@ export class BookingApplicationService {
 
       try {
         for (const seatId of booking.seatIds) {
-          const showSeat = await this.showSeats.findById(booking.showId, seatId);
-          if (!showSeat) {
-            throw new NotFoundError('ShowSeat', `${booking.showId}:${seatId}`);
+          const finalized = await this.showSeats.tryTransition({
+            showId: booking.showId,
+            seatId,
+            from: 'HELD',
+            to: 'BOOKED',
+            holdId: hold.id,
+          });
+          if (!finalized) {
+            // Someone else already moved this seat on -- e.g. the
+            // hold-expiry sweep raced this exact confirmation and released
+            // it first. Treat it the same as any other finalization
+            // failure: compensate below.
+            throw new SeatNotAvailableError(seatId);
           }
-          showSeat.markBooked(hold.id);
-          await this.showSeats.save(showSeat);
         }
         hold.consume();
         await this.holds.save(hold);
@@ -222,11 +243,12 @@ export class BookingApplicationService {
             showId: booking.showId,
           }),
         );
-      } catch (finalizationError) {
+      } catch {
         // Compensating transition: money was captured but inventory
-        // finalization failed. A real saga would trigger an async refund
-        // here (Phase 3); Phase 1 records the compensating state so
-        // cancelBooking() can complete the refund.
+        // finalization failed (someone else moved the seat, e.g. a
+        // hold-expiry sweep racing this exact confirmation). A real saga
+        // triggers an async refund here (Phase 3); for now the compensating
+        // state lets cancelBooking() complete the refund.
         booking.markFinalizationFailed();
         await this.eventPublisher.publish(
           createEvent(PAYMENT_FAILED, {
@@ -246,11 +268,13 @@ export class BookingApplicationService {
       booking.cancel();
 
       for (const seatId of booking.seatIds) {
-        const showSeat = await this.showSeats.findById(booking.showId, seatId);
-        if (showSeat) {
-          showSeat.release(hold.id);
-          await this.showSeats.save(showSeat);
-        }
+        await this.showSeats.tryTransition({
+          showId: booking.showId,
+          seatId,
+          from: 'HELD',
+          to: 'AVAILABLE',
+          holdId: hold.id,
+        });
       }
       hold.release();
       await this.holds.save(hold);
@@ -269,6 +293,28 @@ export class BookingApplicationService {
     return payment;
   }
 
+  /** A duplicate callback that lost the idempotency claim waits briefly for
+   * the winning call's result rather than being told to reprocess. Bounded:
+   * if the original processor never finishes (crashed mid-flight), this
+   * gives up and returns the PENDING row rather than hanging forever — a
+   * production system would pair this with a stuck-PENDING reconciliation
+   * job. Documented as a Phase 2 simplification in the ADR. */
+  private async awaitSettledPayment(
+    initial: Payment,
+    maxAttempts = 20,
+    delayMs = 25,
+  ): Promise<Payment> {
+    let current = initial;
+    for (let attempt = 0; attempt < maxAttempts && current.status === 'PENDING'; attempt++) {
+      await sleep(delayMs);
+      const refreshed = await this.payments.findByIdempotencyKey(current.idempotencyKey);
+      if (refreshed) {
+        current = refreshed;
+      }
+    }
+    return current;
+  }
+
   async cancelBooking(bookingId: string): Promise<Money> {
     const booking = await this.bookings.findById(bookingId);
     if (!booking) {
@@ -281,11 +327,13 @@ export class BookingApplicationService {
         hold.release();
         await this.holds.save(hold);
         for (const seatId of booking.seatIds) {
-          const showSeat = await this.showSeats.findById(booking.showId, seatId);
-          if (showSeat) {
-            showSeat.release(hold.id);
-            await this.showSeats.save(showSeat);
-          }
+          await this.showSeats.tryTransition({
+            showId: booking.showId,
+            seatId,
+            from: 'HELD',
+            to: 'AVAILABLE',
+            holdId: hold.id,
+          });
         }
       }
       booking.cancel();
@@ -342,11 +390,13 @@ export class BookingApplicationService {
     await this.holds.save(hold);
 
     for (const seatId of hold.seatIds) {
-      const showSeat = await this.showSeats.findById(hold.showId, seatId);
-      if (showSeat) {
-        showSeat.release(hold.id);
-        await this.showSeats.save(showSeat);
-      }
+      await this.showSeats.tryTransition({
+        showId: hold.showId,
+        seatId,
+        from: 'HELD',
+        to: 'AVAILABLE',
+        holdId: hold.id,
+      });
     }
 
     const booking = await this.bookings.findByHoldId(hold.id);

@@ -3,11 +3,13 @@ import { InMemoryEventCatalogRepository } from '../../src/repositories/in-memory
 import { InMemoryShowRepository } from '../../src/repositories/in-memory/InMemoryShowRepository';
 import { InMemoryBookingRepository } from '../../src/repositories/in-memory/InMemoryBookingRepository';
 import { InMemoryPaymentRepository } from '../../src/repositories/in-memory/InMemoryPaymentRepository';
+import { InMemoryHoldRepository } from '../../src/repositories/in-memory/InMemoryHoldRepository';
 import { Venue } from '../../src/entities/Venue';
 import { Event } from '../../src/entities/Event';
 import { Show } from '../../src/entities/Show';
 import { Booking } from '../../src/entities/Booking';
 import { Payment } from '../../src/entities/Payment';
+import { Hold } from '../../src/entities/Hold';
 import { Money } from '../../src/shared/Money';
 
 describe('InMemoryShowRepository', () => {
@@ -115,6 +117,45 @@ describe('InMemoryBookingRepository', () => {
   });
 });
 
+describe('InMemoryHoldRepository', () => {
+  it('finds only ACTIVE holds past their expiry across all shows', async () => {
+    const repo = new InMemoryHoldRepository();
+    const now = new Date('2026-01-01T00:10:00Z');
+    const expiredActive = new Hold({
+      id: 'h1',
+      showId: 's1',
+      seatIds: ['seat-1'],
+      userId: 'u1',
+      createdAt: new Date('2026-01-01T00:00:00Z'),
+      ttlSeconds: 300,
+    });
+    const stillActive = new Hold({
+      id: 'h2',
+      showId: 's2',
+      seatIds: ['seat-2'],
+      userId: 'u1',
+      createdAt: new Date('2026-01-01T00:09:00Z'),
+      ttlSeconds: 300,
+    });
+    const expiredButAlreadyConsumed = new Hold({
+      id: 'h3',
+      showId: 's3',
+      seatIds: ['seat-3'],
+      userId: 'u1',
+      createdAt: new Date('2026-01-01T00:00:00Z'),
+      ttlSeconds: 300,
+    });
+    expiredButAlreadyConsumed.consume();
+
+    await repo.save(expiredActive);
+    await repo.save(stillActive);
+    await repo.save(expiredButAlreadyConsumed);
+
+    const expired = await repo.findExpiredActive(now);
+    expect(expired.map((h) => h.id)).toEqual(['h1']);
+  });
+});
+
 describe('InMemoryPaymentRepository', () => {
   it('finds a payment by idempotency key', async () => {
     const repo = new InMemoryPaymentRepository();
@@ -130,5 +171,31 @@ describe('InMemoryPaymentRepository', () => {
 
     expect((await repo.findByIdempotencyKey('idem-key-1'))?.id).toBe('p1');
     expect(await repo.findByIdempotencyKey('unknown')).toBeNull();
+  });
+
+  it('claim() lets the first caller win and hands every later caller the same row', async () => {
+    const repo = new InMemoryPaymentRepository();
+    const first = new Payment({
+      id: 'p1',
+      bookingId: 'b1',
+      amount: Money.of(1000),
+      idempotencyKey: 'idem-key-2',
+      provider: 'MOCK',
+      createdAt: new Date(),
+    });
+    const duplicate = new Payment({
+      id: 'p2',
+      bookingId: 'b1',
+      amount: Money.of(1000),
+      idempotencyKey: 'idem-key-2',
+      provider: 'MOCK',
+      createdAt: new Date(),
+    });
+
+    const firstResult = await repo.claim(first);
+    expect(firstResult).toEqual({ created: true, payment: first });
+
+    const secondResult = await repo.claim(duplicate);
+    expect(secondResult).toEqual({ created: false, payment: first });
   });
 });

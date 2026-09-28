@@ -1,0 +1,190 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum SeatTier {
+  PLATINUM
+  GOLD
+  SILVER
+}
+
+enum ShowStatus {
+  SCHEDULED
+  CANCELLED
+  COMPLETED
+}
+
+enum ShowSeatStatus {
+  AVAILABLE
+  HELD
+  BOOKED
+}
+
+enum HoldStatus {
+  ACTIVE
+  EXPIRED
+  CONSUMED
+  RELEASED
+}
+
+enum BookingStatus {
+  INITIATED
+  HELD
+  PAID
+  CONFIRMED
+  CANCELLED
+  EXPIRED
+  REFUNDED
+}
+
+enum PaymentStatus {
+  PENDING
+  SUCCESS
+  FAILED
+  TIMEOUT
+}
+
+model Venue {
+  id      String @id
+  name    String
+  city    String
+  address String
+
+  seats Seat[]
+  shows Show[]
+
+  @@index([city])
+  @@map("venues")
+}
+
+model Seat {
+  id         String   @id
+  venueId    String
+  section    String
+  row        String
+  seatNumber Int
+  tier       SeatTier
+
+  venue     Venue      @relation(fields: [venueId], references: [id])
+  showSeats ShowSeat[]
+
+  @@index([venueId])
+  @@map("seats")
+}
+
+model Event {
+  id              String  @id
+  title           String
+  genre           String
+  description     String?
+  durationMinutes Int
+
+  shows Show[]
+
+  @@index([genre])
+  @@map("events")
+}
+
+model Show {
+  id              String     @id
+  eventId         String
+  venueId         String
+  startTime       DateTime
+  endTime         DateTime
+  status          ShowStatus @default(SCHEDULED)
+  // Minor-unit price per SeatTier, e.g. {"GOLD": 50000, "SILVER": 30000}.
+  // A JSON column rather than a join table: the tier list is small and
+  // fixed, and this is read-heavy, denormalized-on-write data.
+  basePriceByTier Json
+
+  event     Event      @relation(fields: [eventId], references: [id])
+  venue     Venue      @relation(fields: [venueId], references: [id])
+  showSeats ShowSeat[]
+  holds     Hold[]
+  bookings  Booking[]
+
+  @@index([venueId])
+  @@index([startTime])
+  @@map("shows")
+}
+
+// The inventory record for one seat on one show. The composite primary key
+// is the structural guarantee that exactly one such row exists per
+// (show, seat) — there is no way for two BOOKED rows to exist for the same
+// seat on the same show, because there is only ever one row. The remaining
+// concurrency problem is safely mutating THIS row's status under
+// contention, which is what the conditional UPDATE in
+// PrismaShowSeatRepository.tryHold solves (see docs/adr).
+model ShowSeat {
+  showId String
+  seatId String
+  status ShowSeatStatus @default(AVAILABLE)
+  holdId String?
+
+  show Show @relation(fields: [showId], references: [id])
+  seat Seat @relation(fields: [seatId], references: [id])
+
+  @@id([showId, seatId])
+  @@index([showId, status])
+  @@map("show_seats")
+}
+
+model Hold {
+  id        String     @id
+  showId    String
+  seatIds   String[]
+  userId    String
+  createdAt DateTime
+  expiresAt DateTime
+  status    HoldStatus @default(ACTIVE)
+
+  show     Show      @relation(fields: [showId], references: [id])
+  bookings Booking[]
+
+  @@index([showId])
+  @@index([status, expiresAt])
+  @@map("holds")
+}
+
+model Booking {
+  id               String        @id
+  userId           String
+  showId           String
+  seatIds          String[]
+  amountMinorUnits Int
+  currency         String
+  state            BookingStatus @default(INITIATED)
+  paymentCaptured  Boolean       @default(false)
+  holdId           String?
+  createdAt        DateTime
+  updatedAt        DateTime
+
+  show     Show      @relation(fields: [showId], references: [id])
+  hold     Hold?     @relation(fields: [holdId], references: [id])
+  payments Payment[]
+
+  @@index([holdId])
+  @@index([userId, showId, createdAt])
+  @@map("bookings")
+}
+
+model Payment {
+  id               String        @id
+  bookingId        String
+  amountMinorUnits Int
+  currency         String
+  idempotencyKey   String        @unique
+  provider         String
+  status           PaymentStatus @default(PENDING)
+  createdAt        DateTime
+
+  booking Booking @relation(fields: [bookingId], references: [id])
+
+  @@index([bookingId])
+  @@map("payments")
+}

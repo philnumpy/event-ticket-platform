@@ -12,6 +12,9 @@ export interface BookingProps {
   state?: BookingState;
   paymentCaptured?: boolean;
   holdId?: string | null;
+  /** Reconstruction only (e.g. loading a persisted row) — new bookings
+   * always start with updatedAt === createdAt. */
+  updatedAt?: Date;
 }
 
 /** Aggregate root for the booking lifecycle. Never mutates state directly —
@@ -39,7 +42,7 @@ export class Booking {
     this._state = props.state ?? BookingState.INITIATED;
     this._paymentCaptured = props.paymentCaptured ?? false;
     this._holdId = props.holdId ?? null;
-    this._updatedAt = props.createdAt;
+    this._updatedAt = props.updatedAt ?? props.createdAt;
   }
 
   get state(): BookingState {
