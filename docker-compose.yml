@@ -73,6 +73,9 @@ services:
       REDIS_URL: redis://redis:6379
       KAFKA_BROKERS: kafka:9092
       PORT: "3000"
+      # Set to "false" (and restart) for the Phase 5 load test's
+      # without-cache baseline run -- see k6/README.md.
+      CACHE_ENABLED: "true"
     depends_on:
       postgres:
         condition: service_healthy

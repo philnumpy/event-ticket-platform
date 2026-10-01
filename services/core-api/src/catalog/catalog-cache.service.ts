@@ -16,6 +16,16 @@ import { DOMAIN_EVENT_PUBLISHER, REDIS_CLIENT } from '../persistence/tokens';
 import { CircuitBreaker } from '../common/CircuitBreaker';
 import { circuitBreakerTransitionsTotal } from '../common/metrics/metrics.registry';
 
+// Lets the Phase 5 load test produce a genuine with/without-cache
+// comparison against the identical code path, instead of approximating
+// "without cache" from a cold-cache window that fills in a few seconds
+// anyway (BROWSE_TTL_SECONDS/SEAT_MAP_TTL_SECONDS are both short). Set
+// CACHE_ENABLED=false for the baseline run. Read fresh on every call
+// (not snapshotted at module load) so tests can flip it mid-run.
+function isCacheEnabled(): boolean {
+  return process.env.CACHE_ENABLED !== 'false';
+}
+
 const BROWSE_TTL_SECONDS = 30;
 // Seat-map entries are read far more often than they change during a flash
 // sale, but staleness there is exactly the "double-booking looking" UX bug
@@ -96,6 +106,10 @@ export class CatalogCacheService implements OnModuleInit {
   }
 
   private async cacheAside<T>(key: string, ttlSeconds: number, compute: () => Promise<T>): Promise<T> {
+    if (!isCacheEnabled()) {
+      return compute();
+    }
+
     let cached: string | null;
     try {
       cached = await this.redisBreaker.execute(() => this.redis.get(key));

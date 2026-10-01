@@ -1,0 +1,470 @@
+openapi: 3.0.3
+info:
+  title: Event Ticket Booking Platform API
+  version: "1.0"
+  description: >
+    core-api's HTTP surface. Every POST endpoint accepts an optional
+    `Idempotency-Key` header for safe-retry semantics (ADR 0005). All
+    error responses share the shape in `DomainError`, produced by the
+    global exception filter translating @etp/domain's error hierarchy.
+servers:
+  - url: http://localhost:3000
+    description: Via Nginx (docker compose up), load-balanced across two core-api replicas.
+
+components:
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      schema:
+        type: string
+      description: Opt-in. A repeated key within 24h replays the original response instead of reprocessing.
+    CorrelationId:
+      name: X-Correlation-Id
+      in: header
+      required: false
+      schema:
+        type: string
+      description: Reused if supplied, otherwise minted fresh and echoed in the response header.
+
+  schemas:
+    DomainError:
+      type: object
+      properties:
+        statusCode: { type: integer, example: 409 }
+        error: { type: string, example: SeatNotAvailableError }
+        message: { type: string }
+
+    Money:
+      type: object
+      properties:
+        amount: { type: integer, description: Minor units (e.g. paise) }
+        currency: { type: string, example: INR }
+
+    SeatTier:
+      type: string
+      enum: [PLATINUM, GOLD, SILVER]
+
+    Booking:
+      type: object
+      properties:
+        id: { type: string }
+        userId: { type: string }
+        showId: { type: string }
+        seatIds: { type: array, items: { type: string } }
+        amount: { $ref: '#/components/schemas/Money' }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        state:
+          type: string
+          enum: [INITIATED, HELD, PAID, CONFIRMED, CANCELLED, EXPIRED, REFUNDED]
+        paymentCaptured: { type: boolean }
+        holdId: { type: string, nullable: true }
+
+    Hold:
+      type: object
+      properties:
+        id: { type: string }
+        showId: { type: string }
+        seatIds: { type: array, items: { type: string } }
+        userId: { type: string }
+        createdAt: { type: string, format: date-time }
+        expiresAt: { type: string, format: date-time }
+        status: { type: string, enum: [ACTIVE, EXPIRED, CONSUMED, RELEASED] }
+
+    Payment:
+      type: object
+      properties:
+        id: { type: string }
+        bookingId: { type: string }
+        amount: { $ref: '#/components/schemas/Money' }
+        idempotencyKey: { type: string }
+        provider: { type: string }
+        createdAt: { type: string, format: date-time }
+        status: { type: string, enum: [PENDING, SUCCESS, FAILED, TIMEOUT] }
+
+    ShowSeat:
+      type: object
+      properties:
+        showId: { type: string }
+        seatId: { type: string }
+        status: { type: string, enum: [AVAILABLE, HELD, BOOKED] }
+        holdId: { type: string, nullable: true }
+
+    ShowSummary:
+      type: object
+      properties:
+        showId: { type: string }
+        eventTitle: { type: string }
+        genre: { type: string }
+        venueName: { type: string }
+        city: { type: string }
+        startTime: { type: string, format: date-time }
+        availableSeatCount: { type: integer }
+        totalSeatCount: { type: integer }
+        priceRange:
+          type: object
+          properties:
+            min: { $ref: '#/components/schemas/Money' }
+            max: { $ref: '#/components/schemas/Money' }
+
+  responses:
+    NotFound:
+      description: Not found
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/DomainError' }
+    Conflict:
+      description: Seat/state conflict (e.g. SeatNotAvailableError, InvalidBookingStateTransitionError)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/DomainError' }
+    TooManyRequests:
+      description: Rate limit exceeded (token bucket exhausted)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/DomainError' }
+
+paths:
+  /shows:
+    get:
+      summary: Browse/search shows (cache-aside, 30s TTL)
+      parameters:
+        - name: city
+          in: query
+          schema: { type: string }
+        - name: genre
+          in: query
+          schema: { type: string }
+        - name: dateFrom
+          in: query
+          schema: { type: string, format: date-time }
+        - name: dateTo
+          in: query
+          schema: { type: string, format: date-time }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/ShowSummary' }
+
+  /shows/{showId}/seat-map:
+    get:
+      summary: Per-seat live availability for a show (cache-aside, 5s TTL, invalidated on booking state changes)
+      parameters:
+        - name: showId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/ShowSeat' }
+
+  /bookings:
+    post:
+      summary: Initiate a booking — validates, prices, and atomically holds the requested seats
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [userId, showId, seatIds]
+              properties:
+                userId: { type: string }
+                showId: { type: string }
+                seatIds:
+                  type: array
+                  minItems: 1
+                  maxItems: 20
+                  items: { type: string }
+      responses:
+        '201':
+          description: Seats held; booking is HELD. Publishes SEATS_HELD, which the saga reacts to by requesting payment asynchronously.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  booking: { $ref: '#/components/schemas/Booking' }
+                  hold: { $ref: '#/components/schemas/Hold' }
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Seat already held/booked by someone else, or too many recent bookings (fraud check)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DomainError' }
+        '422':
+          description: Too many seats requested in one booking
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DomainError' }
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  /bookings/{bookingId}:
+    get:
+      summary: Fetch a booking by id
+      parameters:
+        - name: bookingId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Booking' }
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /bookings/{bookingId}/payment:
+    post:
+      summary: >
+        Confirm payment for a HELD booking. Idempotent on `idempotencyKey`:
+        a duplicate callback with the same key replays the original
+        result instead of reprocessing (ADR 0003). Normally driven by the
+        booking saga reacting to payment-service's Kafka response, not
+        called directly by clients — kept as a direct endpoint for
+        testing/manual-override scenarios.
+      parameters:
+        - name: bookingId
+          in: path
+          required: true
+          schema: { type: string }
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [outcome, idempotencyKey]
+              properties:
+                outcome: { type: string, enum: [SUCCESS, FAILED, TIMEOUT] }
+                idempotencyKey: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Payment' }
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '410':
+          description: HoldExpiredError — the hold's TTL elapsed before this payment result arrived; HoldExpirySweep already compensated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DomainError' }
+
+  /bookings/{bookingId}/cancel:
+    post:
+      summary: Cancel a HELD or CONFIRMED booking. Refund amount follows the time-to-show refund policy (full/partial/none) when payment was already captured.
+      parameters:
+        - name: bookingId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  refundAmountMinorUnits: { type: integer }
+                  currency: { type: string }
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Booking is in a state that cannot be cancelled (e.g. already EXPIRED/REFUNDED)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DomainError' }
+
+  /admin/venues:
+    post:
+      summary: Create a venue
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, city, address]
+              properties:
+                name: { type: string }
+                city: { type: string }
+                address: { type: string }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: string }
+                  name: { type: string }
+                  city: { type: string }
+                  address: { type: string }
+
+  /admin/venues/{venueId}/seats:
+    post:
+      summary: Bulk-create seats for a venue
+      parameters:
+        - name: venueId
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [seats]
+              properties:
+                seats:
+                  type: array
+                  minItems: 1
+                  items:
+                    type: object
+                    required: [section, row, seatNumber, tier]
+                    properties:
+                      section: { type: string }
+                      row: { type: string }
+                      seatNumber: { type: integer, minimum: 1 }
+                      tier: { $ref: '#/components/schemas/SeatTier' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id: { type: string }
+                    venueId: { type: string }
+                    section: { type: string }
+                    row: { type: string }
+                    seatNumber: { type: integer }
+                    tier: { $ref: '#/components/schemas/SeatTier' }
+
+  /admin/events:
+    post:
+      summary: Create an event (the bookable "thing" — a movie, concert, etc.)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title, genre, durationMinutes]
+              properties:
+                title: { type: string }
+                genre: { type: string }
+                description: { type: string }
+                durationMinutes: { type: integer, minimum: 1 }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: string }
+                  title: { type: string }
+                  genre: { type: string }
+                  durationMinutes: { type: integer }
+
+  /admin/shows:
+    post:
+      summary: Schedule a show (an Event at a Venue at a specific time, with per-tier pricing)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [eventId, venueId, startTime, endTime, basePriceByTier]
+              properties:
+                eventId: { type: string }
+                venueId: { type: string }
+                startTime: { type: string, format: date-time }
+                endTime: { type: string, format: date-time }
+                basePriceByTier:
+                  type: object
+                  additionalProperties: { type: integer }
+                  example: { GOLD: 50000, SILVER: 30000 }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: string }
+                  eventId: { type: string }
+                  venueId: { type: string }
+                  startTime: { type: string, format: date-time }
+                  endTime: { type: string, format: date-time }
+                  status: { type: string, enum: [SCHEDULED, CANCELLED, COMPLETED] }
+                  basePriceByTier: { type: object }
+
+  /admin/shows/{showId}/inventory:
+    post:
+      summary: Provision ShowSeat inventory for a show from a venue's existing seats
+      parameters:
+        - name: showId
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [venueId]
+              properties:
+                venueId: { type: string }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  showId: { type: string }
+                  seatsProvisioned: { type: integer }
+
+  /metrics:
+    get:
+      summary: Prometheus text-format metrics (default process metrics, HTTP duration/count, rate-limit rejections, circuit-breaker transitions)
+      responses:
+        '200':
+          description: OK
+          content:
+            text/plain:
+              schema: { type: string }

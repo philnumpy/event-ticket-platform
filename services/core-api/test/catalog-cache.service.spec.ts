@@ -6,6 +6,36 @@ function buildCatalogStub(seatMap: jest.Mock, browse: jest.Mock = jest.fn()): Ca
   return { seatMap, browse } as unknown as CatalogQueryService;
 }
 
+describe('CatalogCacheService CACHE_ENABLED toggle (for the Phase 5 with/without-cache load test comparison)', () => {
+  const originalEnv = process.env.CACHE_ENABLED;
+
+  afterEach(() => {
+    process.env.CACHE_ENABLED = originalEnv;
+  });
+
+  it('bypasses Redis entirely and recomputes every call when CACHE_ENABLED=false', async () => {
+    process.env.CACHE_ENABLED = 'false';
+    const seatMapSpy = jest.fn().mockResolvedValue(['fresh']);
+    const cache = new CatalogCacheService(buildCatalogStub(seatMapSpy), new FakeRedis() as never, new DomainEventPublisher());
+
+    await cache.seatMap('show-1');
+    await cache.seatMap('show-1');
+
+    expect(seatMapSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it('caches normally when CACHE_ENABLED is unset (the default)', async () => {
+    delete process.env.CACHE_ENABLED;
+    const seatMapSpy = jest.fn().mockResolvedValue(['cached']);
+    const cache = new CatalogCacheService(buildCatalogStub(seatMapSpy), new FakeRedis() as never, new DomainEventPublisher());
+
+    await cache.seatMap('show-1');
+    await cache.seatMap('show-1');
+
+    expect(seatMapSpy).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('CatalogCacheService', () => {
   it('serves a cached value on the second call without recomputing', async () => {
     const seatMapSpy = jest.fn().mockResolvedValue([{ seatId: 'seat-1', status: 'AVAILABLE' }]);
