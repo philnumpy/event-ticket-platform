@@ -5,6 +5,7 @@ to everything else from there.
 
 | Doc | What's in it |
 |---|---|
+| [interview-prep-deep-dive.md](interview-prep-deep-dive.md) | **Read this one for interview prep.** The "explain it to me from zero" walkthrough of every technology, pattern, and decision, with a suggested narrative arc. |
 | [HLD.md](HLD.md) | Capacity estimation, architecture diagram, data model, scaling/sharding, "at 100x scale," 10 interview talking points |
 | [LLD.md](LLD.md) | Package structure, class diagrams, design patterns, phase-by-phase proof |
 | [adr/](adr) | All 6 Architecture Decision Records |
